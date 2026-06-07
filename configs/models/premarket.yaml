@@ -1,0 +1,75 @@
+# 盘前推荐模型组
+# 包含三个子模型：隔夜映射、开盘跳空分类、融合排序
+
+# --- 隔夜映射模型 ---
+overnight_mapping:
+  model_type: lightgbm
+  objective: regression                 # 预测开盘涨跌幅
+  params:
+    boosting_type: gbdt
+    num_leaves: 31
+    max_depth: 4
+    learning_rate: 0.03
+    n_estimators: 200
+    feature_fraction: 0.7
+    bagging_fraction: 0.7
+    min_data_in_leaf: 20
+    random_state: 42
+  training:
+    retrain_frequency: weekly
+    forward_window: 1d                  # 仅预测次日开盘
+
+# --- 开盘跳空分类模型 ---
+gap_classifier:
+  model_type: lightgbm
+  objective: multiclass                 # 高开/平开/低开
+  num_class: 3
+  params:
+    boosting_type: gbdt
+    num_leaves: 31
+    max_depth: 4
+    learning_rate: 0.03
+    n_estimators: 200
+    feature_fraction: 0.7
+    min_data_in_leaf: 20
+    random_state: 42
+  gap_buckets:                          # 跳空分桶定义
+    gap_up: 0.01                        # >+1% 为高开
+    gap_down: -0.01                     # <-1% 为低开
+  calibration: platt_scaling            # 概率校准方法
+
+# --- 盘前融合排序模型 ---
+fusion_ranker:
+  model_type: lightgbm
+  objective: lambdarank
+  metric: ndcg
+  params:
+    boosting_type: gbdt
+    num_leaves: 63
+    max_depth: 5
+    learning_rate: 0.03
+    n_estimators: 300
+    feature_fraction: 0.7
+    bagging_fraction: 0.7
+    min_data_in_leaf: 30
+    random_state: 42
+  label:
+    type: "intraday_max_return"         # 当日日内最大涨幅作为标签
+    max_holding_minutes: 240            # 截至14:30的最大涨幅
+
+# --- 竞价异常检测 ---
+auction_anomaly:
+  model_type: isolation_forest
+  params:
+    contamination: 0.05                 # 预期异常比例
+    random_state: 42
+  rules:                                # 规则引擎补充
+    fake_order_ratio_threshold: 3.0     # 9:15-9:20申报量/最终匹配量 > 此值标记为虚假申报
+    price_deviation_threshold: 0.05     # 虚拟开盘价偏离昨收 >5% 告警
+
+# --- 盘前推荐通用配置 ---
+pipeline:
+  hard_deadline: "08:45"                # 硬截止时间
+  auction_update_deadline: "09:25"      # 竞价修正截止时间
+  max_recommendations: 30               # 最多推荐30只
+  min_composite_score: 0.3              # 综合评分最低门限

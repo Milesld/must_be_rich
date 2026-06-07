@@ -1,0 +1,31 @@
+# 因子注册表
+# 每个因子定义包含：名称、显示名、类别、计算函数、参数、版本、依赖、缺失阈值
+
+factors:
+  - name: momentum_20d
+    display_name: "20日动量"
+    category: technical
+    function: "core.features.technical.momentum"
+    params: {window: 20}
+    version: "v1.0"
+    depends_on: ["close_adj"]
+    missing_threshold: 0.05
+    description: "过去20个交易日的累计收益率"
+
+  - name: roe_ttm
+    display_name: "ROE(TTM)"
+    category: fundamental
+    function: "core.features.fundamental.roe_ttm"
+    params: {}
+    version: "v1.0"
+    depends_on: ["net_profit", "total_equity"]
+    point_in_time: true                 # 标记为PIT因子（需announce_date约束）
+    missing_threshold: 0.10
+    description: "最近四个季度滚动ROE"
+
+  # 后续批次将添加更多因子：
+  # - momentum_60d, volatility_20d, atr_14, rsi_14, turnover_5d, ...
+  # - pe_ttm, pb, ps_ttm, dividend_yield, revenue_yoy, ...
+  # - main_force_net_inflow_5d, margin_balance_change_5d, ...
+  # - limit_up_count, limit_up_chain_height, ...
+  # - overnight_adr_mapped, auction_strength_score, ...

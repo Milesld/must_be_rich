@@ -1,0 +1,87 @@
+# 中概-A股映射表
+# 用于盘前推荐：隔夜中概股走势 → A股对应标的开盘方向预估
+#
+# 映射逻辑：
+#   weight: 映射权重（0~1），表示中概股涨跌对A股的影响程度
+#   sector: 所属行业板块（用于聚合行业信号）
+#   adr: 美股ADR代码（NASDAQ/NYSE）
+
+mappings:
+  # --- 互联网平台 ---
+  - adr: "BABA"        # 阿里巴巴
+    a_stock: "600633"  #  浙数文化（关联度一般，建议替换为港股映射）
+    weight: 0.3
+    sector: "互联网"
+    note: "A股无直接对应标的，此映射为板块情绪代理"
+
+  - adr: "JD"          # 京东
+    a_stock: "002024"  #  苏宁易购（电商板块）
+    weight: 0.5
+    sector: "电商"
+
+  - adr: "PDD"         # 拼多多
+    a_stock: null       #  A股无直接对应，板块情绪聚合到 consumer_discount
+    weight: 0.0
+    sector: "电商"
+
+  # --- 新能源汽车 ---
+  - adr: "NIO"         # 蔚来
+    a_stock: "600104"  #  上汽集团（传统车企对标）
+    weight: 0.4
+    sector: "新能源汽车"
+    note: "蔚来与上汽关联度低，建议用港股 '9866.HK' 作为映射源"
+
+  - adr: "XPEV"        # 小鹏
+    a_stock: "000625"  #  长安汽车
+    weight: 0.4
+    sector: "新能源汽车"
+
+  - adr: "LI"          # 理想
+    a_stock: "601633"  #  长城汽车
+    weight: 0.4
+    sector: "新能源汽车"
+
+  # --- 新能源/光伏 ---
+  - adr: "DQ"          # 大全新能源
+    a_stock: "600438"  #  通威股份（光伏硅料）
+    weight: 0.7
+    sector: "光伏"
+
+  - adr: "JKS"         # 晶科能源
+    a_stock: "688223"  #  晶科能源（A股科创板，同一家公司）
+    weight: 0.9
+    sector: "光伏"
+
+  # --- 教育/科技 ---
+  - adr: "BILI"        # 哔哩哔哩
+    a_stock: "300413"  #  芒果超媒（视频内容平台对标）
+    weight: 0.5
+    sector: "传媒娱乐"
+
+  - adr: "TAL"         # 好未来
+    a_stock: "300192"  #  科德教育（教育板块）
+    weight: 0.5
+    sector: "教育"
+
+  # --- 生物医药 ---
+  - adr: "BGNE"        # 百济神州
+    a_stock: "688235"  #  百济神州（A股科创板，同一家公司）
+    weight: 0.9
+    sector: "生物医药"
+
+  - adr: "ZLAB"        # 再鼎医药
+    a_stock: "688180"  #  君实生物（创新药对标）
+    weight: 0.6
+    sector: "生物医药"
+
+# 板块聚合规则
+sector_aggregation:
+  method: "weighted_average"   # 按 weight 加权平均每个板块内映射信号的涨跌幅
+  min_mappings: 2              # 板块内至少需要2个有效映射才输出信号
+
+# 使用说明
+# 1. 并非所有中概股都有直接A股对应——这很正常
+# 2. weight=0.0 的条目仅参与板块情绪聚合，不产生个股信号
+# 3. 映射表需定期维护（每季度检查新增/退市中概股）
+# 4. 同一家公司两地上市的（如晶科能源、百济神州），weight 设为 0.9
+#    因为隔夜美股涨跌对A股开盘的传导最为直接

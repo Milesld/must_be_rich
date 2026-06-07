@@ -1,0 +1,18 @@
+# 券商/QMT连接配置
+
+qmt:
+  enabled: false                        # 实盘下单前需设置为 true
+  account_type: "simulation"            # simulation / real
+  broker: "guoxin"                      # 券商名称
+  mini_qmt_path: "${QMT_PATH:C:\\国金证券\\QMT\\userdata_mini}"
+  session_id: 0
+  auto_reconnect: true
+  reconnect_interval_seconds: 5
+
+  # 下单限制
+  order_limits:
+    max_retry: 1                        # 超时最多重试1次
+    timeout_ms: 100                     # 下单超时（毫秒）
+
+# 备用券商（可选）
+backup_brokers: []

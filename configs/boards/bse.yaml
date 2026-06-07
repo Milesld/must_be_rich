@@ -1,0 +1,18 @@
+# 北交所
+board_id: "bse"
+description: "北京证券交易所"
+exchanges: ["BSE"]
+
+price_limit: 0.30                     # ±30%
+price_limit_overrides: []
+
+min_shares: 100
+increment: 100                        # 100股整数倍递增
+
+price_cage:
+  buy_ratio: 1.02
+  sell_ratio: 0.98
+
+market_order_limit: null
+limit_order_max_shares: null
+t_plus: 1

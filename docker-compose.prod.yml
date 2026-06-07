@@ -1,0 +1,86 @@
+# 量化交易系统 — 生产环境 Docker Compose 覆盖配置
+# 使用: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+version: "3.8"
+
+services:
+  # ── Redpanda 3节点集群 ──────────
+  redpanda:
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+    command:
+      - redpanda start
+      - --smp 4
+      - --memory 2G
+      - --kafka-addr internal://0.0.0.0:9092
+
+  # ── ClickHouse 2分片×2副本 ─────────
+  clickhouse:
+    deploy:
+      replicas: 1  # 单机多副本通过配置实现
+    volumes:
+      - ch_data_prod:/var/lib/clickhouse
+    environment:
+      CLICKHOUSE_USER: ${CH_USER}
+      CLICKHOUSE_PASSWORD: ${CH_PASSWORD}
+
+  # ── MySQL 主从 ──────────────────
+  mysql:
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+
+  # ── Redis Cluster 3主3从 ────────
+  redis:
+    deploy:
+      replicas: 3
+    command: redis-server --cluster-enabled yes --appendonly yes
+
+  # ── 资源限制 ────────────────────
+  data_collector:
+    deploy:
+      resources:
+        limits: { cpus: "1", memory: 512M }
+        reservations: { cpus: "0.5", memory: 256M }
+
+  feature_server:
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 1G }
+
+  nlp_service:
+    deploy:
+      resources:
+        limits: { cpus: "4", memory: 8G }
+    # GPU: uncomment for GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  risk_engine:
+    deploy:
+      resources:
+        limits: { cpus: "1", memory: 256M }
+
+  intraday_service:
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 1G }
+
+  # ── C++ 组件直接宿主机部署（非容器）──
+  # 编译: cd cpp && mkdir build && cd build && cmake .. && make -j4
+  # 部署: cp build/*.so /usr/local/lib/
+  # Python: export PYTHONPATH=/usr/local/lib:$PYTHONPATH
+
+volumes:
+  ch_data_prod:

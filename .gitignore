@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# 虚拟环境
+.env
+.venv/
+venv/
+
+# 运行时数据（不提交——每个环境独立生成）
+data/checkpoints/
+data/models/
+data/reports/
+data/premarket_recommendations/
+data/logs/
+data/backups/
+~/.quant_system/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 本地安装的包（离线环境被迫手动装的）
+lightgbm/
+lightgbm-*.dist-info/
+
+# C++ 编译产物
+cpp/build/
+
+# 大文件
+*.parquet
+*.h5
+*.hdf5
+
+# Docker volumes (从 docker-compose 挂载的)
+data/

@@ -1,0 +1,18 @@
+# 深交所创业板
+board_id: "szse_gem"
+description: "深交所创业板"
+exchanges: ["SZSE"]
+
+price_limit: 0.20                     # ±20%
+price_limit_overrides: []             # 创业板无ST分类
+
+min_shares: 100
+increment: 100
+
+price_cage:
+  buy_ratio: 1.02
+  sell_ratio: 0.98
+
+market_order_limit: null
+limit_order_max_shares: null
+t_plus: 1

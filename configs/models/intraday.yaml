@@ -1,0 +1,35 @@
+# 日内预测模型 — LightGBM 三分类 + 分位数回归
+model_type: lightgbm
+objective: multiclass                   # 涨/跌/平三分类
+num_class: 3
+
+params:
+  boosting_type: gbdt
+  num_leaves: 63
+  max_depth: 5
+  learning_rate: 0.03
+  n_estimators: 300
+  feature_fraction: 0.7
+  bagging_fraction: 0.7
+  bagging_freq: 3
+  min_data_in_leaf: 30
+  early_stopping_rounds: 30
+  random_state: 42
+
+training:
+  time_buckets:                         # 按距收盘剩余时间分桶建模
+    - name: "morning"                   # 上午时段
+      time_range: ["09:30", "11:30"]
+    - name: "afternoon_early"           # 下午前半段
+      time_range: ["13:00", "14:30"]
+    - name: "afternoon_late"            # 尾盘
+      time_range: ["14:30", "14:57"]
+    - name: "closing_auction"           # 收盘集合竞价
+      time_range: ["14:57", "15:00"]
+  purge_days: 1                         # 日频数据purge
+  retrain_frequency: weekly
+  sample_weight_decay: 0.95             # 样本权重指数衰减因子（近期优先）
+
+evaluation:
+  direction_accuracy_threshold: 0.55    # 方向准确率最低门限
+  calibration_monitoring: true          # 启用概率校准监控

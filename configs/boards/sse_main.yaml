@@ -1,0 +1,24 @@
+# 上交所主板
+board_id: "sse_main"
+description: "上交所主板"
+exchanges: ["SSE"]
+
+price_limit: 0.10                     # ±10%
+
+# 涨跌停适用条件（用于回测分时段切换）
+price_limit_overrides:
+  - condition: "is_st == True and trade_date < '2026-07-06'"
+    price_limit: 0.05                 # ST股2026年7月6日前±5%
+  - condition: "is_st == True and trade_date >= '2026-07-06'"
+    price_limit: 0.10                 # 2026年7月6日起改为±10%
+
+min_shares: 100                       # 一手100股
+increment: 100                        # 100股整数倍递增
+
+price_cage:                           # 价格笼子（连续竞价阶段）
+  buy_ratio: 1.02                     # 买入申报价 ≤ 基准价×102%
+  sell_ratio: 0.98                    # 卖出申报价 ≥ 基准价×98%
+
+market_order_limit: null              # 市价申报无特殊上限
+limit_order_max_shares: null          # 限价申报无特殊上限
+t_plus: 1                             # T+1交收

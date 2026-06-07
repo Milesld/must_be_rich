@@ -1,0 +1,31 @@
+# 系统级配置
+
+timezone: "Asia/Shanghai"
+language: "zh_CN"
+log_level: "${LOG_LEVEL:INFO}"
+env: "${ENV:dev}"                      # dev / staging / production
+
+# --- 交易全局设置 ---
+trading:
+  default_commission_rate: 0.00015      # 默认佣金率（万1.5）
+  stamp_duty_rate: 0.0005               # 印花税（0.05%，仅卖方）
+  transfer_fee_rate: 0.00001            # 过户费（十万分之一）
+  min_commission: 5.0                   # 最低佣金（元/笔）
+  benchmark_code: "000300"              # 比较基准（沪深300）
+
+# --- 数据管线 ---
+data_pipeline:
+  checkpoint_dir: "data/checkpoints"    # 断点续传目录
+  quality_check_enabled: true           # 启用数据质量检查
+  daily_kline_retention_days: null      # 日K线保留天数（null=永久）
+
+# --- 消息队列 ---
+redpanda:
+  brokers: ["${REDPANDA_BROKER:localhost:9092}"]
+  consumer_group: "quant-system"
+
+# --- 数据库 ---
+databases:
+  clickhouse_url: "${CLICKHOUSE_URL:http://localhost:8123}"
+  mysql_url: "${MYSQL_URL:mysql://quant:quant@localhost:3306/quant}"
+  redis_url: "${REDIS_URL:redis://localhost:6379}"

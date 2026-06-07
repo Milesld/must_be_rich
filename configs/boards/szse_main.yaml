@@ -1,0 +1,22 @@
+# 深交所主板
+board_id: "szse_main"
+description: "深交所主板"
+exchanges: ["SZSE"]
+
+price_limit: 0.10                     # ±10%
+price_limit_overrides:
+  - condition: "is_st == True and trade_date < '2026-07-06'"
+    price_limit: 0.05
+  - condition: "is_st == True and trade_date >= '2026-07-06'"
+    price_limit: 0.10
+
+min_shares: 100
+increment: 100
+
+price_cage:
+  buy_ratio: 1.02
+  sell_ratio: 0.98
+
+market_order_limit: null
+limit_order_max_shares: null
+t_plus: 1

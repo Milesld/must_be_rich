@@ -1,0 +1,23 @@
+# 上交所科创板
+board_id: "sse_star"
+description: "上交所科创板"
+exchanges: ["SSE"]
+
+price_limit: 0.20                     # ±20%
+price_limit_overrides: []             # 科创板无ST股，无覆盖规则
+
+min_shares: 200                       # 最低200股起
+increment: 1                          # 超200股后1股递增
+
+price_cage:                           # 价格笼子
+  buy_ratio: 1.02
+  sell_ratio: 0.98
+
+market_order_limit: 50000             # 市价申报上限5万股
+limit_order_max_shares: 100000        # 限价申报上限10万股
+t_plus: 1
+
+# 科创板特别规则
+special_rules:
+  - "余额不足200股须一次性卖出"
+  - "限价申报200股起"

@@ -1,0 +1,51 @@
+# 数据源连接配置
+
+# --- 主数据源（免费） ---
+akshare:
+  enabled: true
+  description: "AkShare — 开源免费数据源，覆盖面最广"
+  type: "rest_api"
+  retry_count: 3
+  timeout_seconds: 30
+
+# --- 备用/补充数据源 ---
+tushare:
+  enabled: false                        # 需要配置 TUSHARE_TOKEN 后启用
+  description: "Tushare Pro — 社区化金融数据平台"
+  type: "rest_api"
+  token: "${TUSHARE_TOKEN:}"
+  retry_count: 3
+  timeout_seconds: 30
+
+# --- 商业化数据源（升级选项） ---
+wind:
+  enabled: false
+  description: "Wind 万得 — 行业金标准，机构级数据"
+  type: "sdk"
+  # Wind 需要本地安装客户端 SDK
+
+ifind:
+  enabled: false
+  description: "iFinD 同花顺 — Wind第一竞品，性价比最高商业方案"
+  type: "rest_api"
+
+choice:
+  enabled: false
+  description: "Choice 东方财富 — 性价比商业终端"
+  type: "sdk"
+
+# --- 实时行情 ---
+qmt:
+  enabled: false
+  description: "QMT/miniQMT — 券商提供的实时行情和交易接口"
+  type: "sdk"
+  level2_enabled: false                # Level-2 行情（需券商开通）
+  account_id: "${QMT_ACCOUNT_ID:}"
+  data_path: "${QMT_DATA_PATH:}"
+
+# --- 主备切换策略 ---
+fallback:
+  max_failures_before_switch: 3         # 主源连续失败N次后切换备用源
+  primary: "akshare"
+  fallback: "tushare"
+  retry_primary_after_seconds: 3600     # 1小时后尝试切回主源

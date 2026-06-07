@@ -1,0 +1,32 @@
+# 合规禁止池
+# 以下股票在任何情况下均不得交易。
+# 支持手动添加和通过自动化规则批量更新。
+
+# --- 手动黑名单 ---
+manual_blacklist: []
+
+# --- 自动化规则 ---
+auto_rules:
+  - reason: "ST"
+    condition: "is_st == True"
+    description: "所有ST和*ST股票"
+
+  - reason: "delisting_risk"
+    condition: "delisting_risk_flag == True"
+    description: "已发布退市风险警示的股票"
+
+  - reason: "suspended_long"
+    condition: "consecutive_suspended_days > 30"
+    description: "连续停牌超过30个交易日"
+
+  - reason: "low_liquidity"
+    condition: "avg_daily_amount_20d < 5000000"
+    description: "20日均成交额 < 500万元（流动性不足）"
+
+  - reason: "new_listing"
+    condition: "listing_days < 60"
+    description: "上市不足60个交易日（次新股波动过大）"
+
+  - reason: "compliance_ban"
+    condition: "regulatory_penalty_flag == True"
+    description: "被证监会或交易所立案调查/处罚的股票"

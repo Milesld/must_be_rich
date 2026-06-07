@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Skill(deep-research)",
+      "Skill(deep-research:*)",
+      "WebFetch(domain:tushare.pro)",
+      "WebFetch(domain:www.guoyuanqh.com)",
+      "Bash(python -c ' *)",
+      "Bash(Path\" | head -10 && echo \"===\" && grep -rn \"data/\\\\|~/\\\\.\\\\|\\\\.parquet\" /Users/lidong/projects/claude/must_be_rich/core/backtest/engine.py | head -10)"
+    ]
+  }
+}

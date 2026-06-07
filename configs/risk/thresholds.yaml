@@ -1,0 +1,45 @@
+# 风控阈值配置（支持热加载）
+# 修改此文件后风控引擎自动热更新（通过 Redis pub/sub 或文件轮询）
+
+pre_trade:                              # === 事前风控（下单前 <10ms） ===
+  single_stock_max_ratio: 0.20          # 单票占总资产≤20%
+  single_stock_hard_max: 0.25           # 硬上限（无论如何不超过）
+  industry_max_ratio: 0.40              # 单行业≤40%
+  daily_max_orders: 20000               # 全日申报笔数上限（合规硬限）
+  second_max_orders: 300                # 每秒申报笔数上限（合规硬限）
+  cancel_rate_max: 0.70                 # 1秒内撤单率上限
+  single_order_max_amount: 500000       # 单笔最大金额（元）
+  blacklist_reasons:                    # 禁止交易的原因
+    - "ST"
+    - "delisting_risk"
+    - "compliance_ban"
+
+portfolio:                              # === 组合级风控（实时） ===
+  drawdown_daily_circuit: 0.15          # 当日回撤>15% → 熔断
+  drawdown_rolling_circuit: 0.25        # 5日滚动回撤>25% → 熔断
+  rolling_window_days: 5                # 滚动回撤窗口（天）
+  var_limit_95: 0.05                    # 95% VaR < 5%
+  cvar_limit_95: 0.08                   # 95% CVaR < 8%
+  vol_target: 0.15                      # 年化波动率目标15%
+  max_leverage: 1.0                     # 最大杠杆(1.0=无杠杆)
+
+extreme_scenario:                       # === 极端行情预案 ===
+  max_single_day_loss: 0.10             # 单日最大亏损>10% → 强制平短期仓
+  circuit_breaker_action: "reduce_trading_first"  # 熔断时优先减交易仓
+  hedge_instrument_priority:             # 对冲工具优先级
+    - "IF"                               # 沪深300股指期货
+    - "IC"                               # 中证500
+    - "IM"                               # 中证1000
+  emergency_cash_buffer_ratio: 0.05      # 最坏情形资金缓冲（占总资产5%）
+
+position_sizing:                        # === 仓位规模约束 ===
+  long_term_ratio: [0.60, 0.80]         # 长期仓60%-80%
+  short_term_ratio: [0.20, 0.40]        # 短期仓20%-40%
+  novice_short_term_max: 0.20           # 新手短期仓≤20%
+  min_single_order_amount: 5000         # 单笔最小金额（元），小于此值佣金占比过高
+  max_single_order_fee_ratio: 0.001     # 单笔佣金/金额 < 0.1%
+
+rebalance:                              # === 再平衡参数 ===
+  monthly_rebalance_day: "last_trading_day"  # 月度调仓日
+  drift_tolerance: 0.03                 # 权重偏离>3%触发再平衡
+  min_rebalance_amount: 5000            # 调仓最小金额（低于此值的微调跳过）
