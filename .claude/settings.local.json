@@ -7,7 +7,10 @@
       "WebFetch(domain:tushare.pro)",
       "WebFetch(domain:www.guoyuanqh.com)",
       "Bash(python -c ' *)",
-      "Bash(Path\" | head -10 && echo \"===\" && grep -rn \"data/\\\\|~/\\\\.\\\\|\\\\.parquet\" /Users/lidong/projects/claude/must_be_rich/core/backtest/engine.py | head -10)"
+      "Bash(Path\" | head -10 && echo \"===\" && grep -rn \"data/\\\\|~/\\\\.\\\\|\\\\.parquet\" /Users/lidong/projects/claude/must_be_rich/core/backtest/engine.py | head -10)",
+      "Read(//private/var/run/**)",
+      "Bash(scutil --dns)",
+      "Bash(python -c \"from core.common.calendar import TradingCalendar; cal = TradingCalendar\\(offline_ok=True\\); print\\(f'OK: {len\\(cal.all_trading_days\\)} days'\\)\")"
     ]
   }
 }

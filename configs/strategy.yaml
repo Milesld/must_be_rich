@@ -1,0 +1,580 @@
+# ══════════════════════════════════════════════════════════
+# 策略配置文件 — 所有可调参数集中于此
+# 修改后运行 python research/run_backtest_demo.py 即可生效
+# ══════════════════════════════════════════════════════════
+
+# ── 回测设置 ──────────────────────────────
+backtest:
+  start_date: "2024-01-02"
+  end_date: "2025-12-31"
+  initial_capital: 1_000_000       # 初始资金（元）
+
+# ── 数据源 ────────────────────────────────
+data_source:
+  # 数据提供方：sina / eastmoney（akshare底层接口）
+  provider: sina
+  # 股票池：代码列表。为空 [] 时使用内置默认80只
+  codes: []
+  # 拉取数据提前多少天（用于因子计算滚动窗口）
+  lookback_days: 400
+
+# ── 策略参数 ──────────────────────────────
+strategy:
+  # 持仓数量
+  top_n: 5
+  # 调仓频率：monthly / weekly / daily
+  rebalance_frequency: monthly
+  # 买入时的最小股数（低于此值跳过）
+  min_shares: 100
+  # 组合优化器：equal_weight / signal_weighted / inverse_vol_weight / risk_parity / min_cvar
+  optimizer: equal_weight
+
+# ── 因子配置 ──────────────────────────────
+# enabled=true 的因子才会参与评分
+# weight 是该因子在综合评分中的权重，所有已启用因子的 weight 会被自动归一化（不需要手动凑到1.0）
+# description 仅为注释说明，程序不读取
+factors:
+
+  # ═══ 技术面因子（14个）— core/features/technical.py ═══
+  momentum_20d:
+    enabled: true
+    weight: 0.6
+    module: core.features.technical
+    function: momentum
+    params: {window: 20}
+    description: "20日累计收益率"
+
+  volatility_20d:
+    enabled: true
+    weight: 0.4
+    module: core.features.technical
+    function: volatility
+    params: {window: 20}
+    description: "20日年化波动率（反转：低波动→高分）"
+
+  momentum_60d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: momentum
+    params: {window: 60}
+    description: "60日累计收益率（中期动量）"
+
+  alpha_momentum_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: alpha_momentum
+    params: {window: 20}
+    description: "剔除市场beta后的纯alpha动量"
+
+  amplitude_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: amplitude
+    params: {window: 20}
+    description: "20日平均振幅（反转：高振幅→高分或低分取决于策略方向）"
+
+  atr_14:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: atr
+    params: {window: 14}
+    description: "14日平均真实波幅（衡量波动幅度）"
+
+  turnover_5d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: turnover
+    params: {window: 5}
+    description: "5日平均换手率（活跃度指标）"
+
+  turnover_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: turnover
+    params: {window: 20}
+    description: "20日平均换手率"
+
+  volume_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: volume_ratio
+    params: {window: 20}
+    description: "当日成交量/20日均量（放量/缩量信号）"
+
+  amihud_illiq:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: amihud_illiq
+    params: {window: 20}
+    description: "Amihud非流动性指标（值越大流动性越差→反转项）"
+
+  rsi_14:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: rsi
+    params: {window: 14}
+    description: "14日RSI（30以下超卖→高分, 70以上超买→低分）"
+
+  macd_dif:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_dif
+    params: {fast: 12, slow: 26, signal: 9}
+    description: "MACD快慢线差值（DIF）"
+
+  macd_dea:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_dea
+    params: {fast: 12, slow: 26, signal: 9}
+    description: "MACD信号线（DEA）"
+
+  macd_hist:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_hist
+    params: {fast: 12, slow: 26, signal: 9}
+    description: "MACD柱状图（DIF-DEA）×2"
+
+  bollinger_position:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: bollinger_position
+    params: {window: 20, num_std: 2}
+    description: "布林带位置（0=下轨, 0.5=中轨, 1=上轨）"
+
+  ma_alignment:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: ma_alignment
+    params: {short: 5, mid: 20, long: 60}
+    description: "均线多空排列评分（+1多头, 0交叉, -1空头）"
+
+  # ═══ 基本面因子（19个）— core/features/fundamental.py ═══
+  # ★ 注意：基本面因子需要加载财报数据（financial_statements表或API）
+  # ★ 当前 demo 模式下，这些因子返回中性值0.0
+  # ★ 全部支持 Point-in-Time 模式（防前视偏差）
+  pe_ttm:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: pe_ttm
+    params: {point_in_time: true}
+    description: "市盈率(TTM) — 反转：低PE→高分"
+
+  pb:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: pb
+    params: {point_in_time: true}
+    description: "市净率 — 反转：低PB→高分"
+
+  ps_ttm:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: ps_ttm
+    params: {point_in_time: true}
+    description: "市销率(TTM)"
+
+  pcf_ttm:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: pcf_ttm
+    params: {point_in_time: true}
+    description: "市现率(TTM)"
+
+  peg:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: peg
+    params: {point_in_time: true}
+    description: "PEG = PE/盈利增速"
+
+  dividend_yield:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: dividend_yield
+    params: {point_in_time: true}
+    description: "股息率"
+
+  ep_ttm:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: ep_ttm
+    params: {point_in_time: true}
+    description: "盈利收益率 = 1/PE"
+
+  roe_ttm:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: roe_ttm
+    params: {point_in_time: true}
+    description: "ROE(TTM) — 净资产收益率"
+
+  roa_ttm:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: roa_ttm
+    params: {point_in_time: true}
+    description: "ROA(TTM) — 总资产收益率"
+
+  roic_ttm:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: roic_ttm
+    params: {point_in_time: true}
+    description: "ROIC(TTM) — 投入资本回报率"
+
+  gross_margin_trend:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: gross_margin_trend
+    params: {point_in_time: true}
+    description: "毛利率近4季度趋势斜率"
+
+  net_margin_ttm:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: net_margin_ttm
+    params: {point_in_time: true}
+    description: "净利率(TTM)"
+
+  revenue_yoy:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: revenue_yoy
+    params: {point_in_time: true}
+    description: "营收同比增速"
+
+  net_profit_yoy:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: net_profit_yoy
+    params: {point_in_time: true}
+    description: "净利润同比增速"
+
+  debt_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: debt_ratio
+    params: {point_in_time: true}
+    description: "资产负债率 — 反转：低负债→高分"
+
+  current_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: current_ratio
+    params: {point_in_time: true}
+    description: "流动比率"
+
+  quick_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: quick_ratio
+    params: {point_in_time: true}
+    description: "速动比率"
+
+  cf_ratio_ttm:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: cf_ratio_ttm
+    params: {point_in_time: true}
+    description: "经营现金流/净利润（盈利质量检查，<0.5为危险信号）"
+
+  free_cf_yield:
+    enabled: false
+    weight: 0.0
+    module: core.features.fundamental
+    function: free_cf_yield
+    params: {point_in_time: true}
+    description: "自由现金流/市值"
+
+  # ═══ 资金面因子（7个）— core/features/capital_flow.py ═══
+  # ★ 注意：资金面因子需要额外加载两融/龙虎榜/北向数据
+  main_force_net_inflow_5d:
+    enabled: false
+    weight: 0.0
+    module: core.features.capital_flow
+    function: main_force_net_inflow
+    params: {window: 5}
+    description: "主力资金5日累计净流入"
+
+  main_force_net_inflow_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.capital_flow
+    function: main_force_net_inflow
+    params: {window: 20}
+    description: "主力资金20日累计净流入"
+
+  main_force_inflow_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.capital_flow
+    function: main_force_inflow_ratio
+    params: {window: 5}
+    description: "大单净流入/总成交额（主力参与度）"
+
+  margin_balance_change_5d:
+    enabled: false
+    weight: 0.0
+    module: core.features.capital_flow
+    function: margin_balance_change
+    params: {window: 5}
+    description: "融资余额5日变化率"
+
+  dragon_tiger_net_buy:
+    enabled: false
+    weight: 0.0
+    module: core.features.capital_flow
+    function: dragon_tiger_net_buy
+    params: {}
+    description: "最近龙虎榜机构净买入额排名分位（0~1）"
+
+  dragon_tiger_institution_count:
+    enabled: false
+    weight: 0.0
+    module: core.features.capital_flow
+    function: dragon_tiger_institution_count
+    params: {window: 20}
+    description: "近20天龙虎榜机构席位出现次数"
+
+  northbound_quarter_change:
+    enabled: false
+    weight: 0.0
+    module: core.features.capital_flow
+    function: northbound_quarter_change
+    params: {}
+    description: "北向资金季度持仓变化（★仅季度频率可用！2024.8起每日数据已取消）"
+
+  lockup_expiry_days:
+    enabled: false
+    weight: 0.0
+    module: core.features.capital_flow
+    function: lockup_expiry_days
+    params: {}
+    description: "距下次限售解禁天数（反转：越近越危险→低分）"
+
+  # ═══ 情绪/事件因子（8个）— core/features/sentiment.py ═══
+  # ★ 注意：大部分需要全市场聚合数据
+  limit_up_count:
+    enabled: false
+    weight: 0.0
+    module: core.features.sentiment
+    function: limit_up_count
+    params: {}
+    description: "全市场涨停家数"
+
+  limit_up_chain_height:
+    enabled: false
+    weight: 0.0
+    module: core.features.sentiment
+    function: limit_up_chain_height
+    params: {}
+    description: "最高连板高度"
+
+  limit_down_count:
+    enabled: false
+    weight: 0.0
+    module: core.features.sentiment
+    function: limit_down_count
+    params: {}
+    description: "全市场跌停家数（反转：越多越恐慌→高分=逆向买入信号）"
+
+  board_break_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.sentiment
+    function: board_break_ratio
+    params: {}
+    description: "炸板率（越高情绪越差）"
+
+  limit_up_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.sentiment
+    function: limit_up_ratio
+    params: {}
+    description: "涨停家数/上涨家数（赚钱效应代理）"
+
+  auction_open_premium:
+    enabled: false
+    weight: 0.0
+    module: core.features.sentiment
+    function: auction_open_premium
+    params: {}
+    description: "集合竞价虚拟开盘价相对昨收涨跌幅（需L2数据）"
+
+  auction_volume_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.sentiment
+    function: auction_volume_ratio
+    params: {avg_window: 20}
+    description: "竞价匹配量/近20日均量（需L2数据）"
+
+  performance_forecast_surprise:
+    enabled: false
+    weight: 0.0
+    module: core.features.sentiment
+    function: performance_forecast_surprise
+    params: {}
+    description: "业绩预告超预期量化（大增=+2, 扭亏=+3, 首亏=-3）"
+
+  # ═══ 盘前专属因子（10个）— core/features/premarket.py ═══
+  # ★ 注意：盘前因子用于盘前推荐子系统，需要隔夜海外市场/公告/竞价数据
+  overnight_adr_mapped:
+    enabled: false
+    weight: 0.0
+    module: core.features.premarket
+    function: overnight_adr_mapped
+    params: {}
+    description: "隔夜中概股ADR→A股映射信号"
+
+  a50_futures_overnight:
+    enabled: false
+    weight: 0.0
+    module: core.features.premarket
+    function: a50_futures_overnight
+    params: {}
+    description: "富时A50期货隔夜涨跌幅"
+
+  hsi_futures_overnight:
+    enabled: false
+    weight: 0.0
+    module: core.features.premarket
+    function: hsi_futures_overnight
+    params: {}
+    description: "恒指期货隔夜涨跌幅"
+
+  announcement_sentiment_score:
+    enabled: false
+    weight: 0.0
+    module: core.features.premarket
+    function: announcement_sentiment_score
+    params: {}
+    description: "公告NLP情绪评分（当前关键词规则版，可升级Qwen3）"
+
+  dragon_tiger_review_score:
+    enabled: false
+    weight: 0.0
+    module: core.features.premarket
+    function: dragon_tiger_review_score
+    params: {}
+    description: "龙虎榜复盘综合评分（机构+游资+买卖力量比）"
+
+  limit_up_review_signal:
+    enabled: false
+    weight: 0.0
+    module: core.features.premarket
+    function: limit_up_review_signal
+    params: {lookback_days: 60}
+    description: "昨日涨停股今日高开概率（基于60日历史统计）"
+
+  theme_heat_score:
+    enabled: false
+    weight: 0.0
+    module: core.features.premarket
+    function: theme_heat_score
+    params: {}
+    description: "盘前题材热度（新闻标题→概念提及频率→排序）"
+
+  auction_strength_score:
+    enabled: false
+    weight: 0.0
+    module: core.features.premarket
+    function: auction_strength_score
+    params: {}
+    description: "竞价强度综合评分（偏离度×0.4+量比×0.3+不平衡度×0.3）"
+
+  auction_fake_order_risk:
+    enabled: false
+    weight: 0.0
+    module: core.features.premarket
+    function: auction_fake_order_risk
+    params: {threshold: 3.0}
+    description: "竞价虚假申报风险（9:15-9:20大单后撤→可疑，反转→低分）"
+
+  days_to_next_event:
+    enabled: false
+    weight: 0.0
+    module: core.features.premarket
+    function: days_to_next_event
+    params: {}
+    description: "距下一重大事件（业绩披露/股东大会/限售解禁）的剩余天数"
+
+# ── 因子计算通用设置 ─────────────────────
+factor_settings:
+  # 计算因子时的回看窗口（交易日数）
+  lookback_window: 60
+  # 最小有效价格点数（不足则跳过该股票）
+  min_price_points: 22
+
+# ── 退出/风控设置 ─────────────────────────
+exit_rules:
+  # 是否启用退出监控（true启用，false跳过）
+  enabled: false
+  # 止损：ATR倍数止损（当前价 ≤ 入场价 - N×ATR）
+  stop_loss_atr_mult: 2.0
+  # 止损：固定比例止损（当前价 ≤ 入场价 × (1 - pct)）
+  stop_loss_pct: 0.08
+  # 止盈：目标收益率（当前价 ≥ 入场价 × (1 + target)）
+  take_profit_target: 0.20
+  # 移动止盈：从持仓期间最高点回撤超过此比例即卖
+  trailing_stop_pct: 0.10
+  # 时间止损：持有超过N天仍未盈利→退出
+  max_hold_days: 60
+
+# ── 佣金/费用设置 ─────────────────────────
+# 覆盖 system.yaml 中的默认值
+trading_costs:
+  commission_rate: 0.00015    # 佣金率（万1.5）
+  stamp_duty_rate: 0.0005     # 印花税（0.05%，仅卖方）
+  min_commission: 5.0         # 最低佣金（元/笔）
+  # 滑点估算（按流动性分层）
+  slippage_csi800: 0.001      # 中证800成分股 0.1%
+  slippage_main: 0.002        # 其他主板 0.2%
+  slippage_gem_star: 0.003    # 创业板/科创板 0.3%
+  slippage_small_cap: 0.005   # 小盘股（<50亿）0.5%
+
+# ── 模拟数据设置（网络不可用时的降级方案）──
+simulation:
+  # 生成的股票数量
+  num_stocks: 100
+  # 其中"好股票"数量（有正偏收益，策略应能选中来验证排序能力）
+  good_stocks: 30
+  # "好股票"日化漂移率范围（年化约7.5%~37.5%）
+  good_drift_range: [0.0003, 0.0015]
+  # 全部股票波动率范围
+  vol_range: [0.015, 0.04]

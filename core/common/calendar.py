@@ -133,26 +133,43 @@ class TradingCalendar:
     # —— 内部方法 ——
 
     def _load(self, force_refresh: bool = False, offline_ok: bool = True) -> None:
-        """加载交易日历：优先缓存，其次网络拉取。"""
+        """加载交易日历：缓存优先 → 失败则估算，不主动联网。
+
+        只在 force_refresh=True 时才尝试重新从网络拉取。
+        这是为了避免代理/防火墙环境下无限期卡死。
+        """
+        # 1. 缓存存在 → 直接用
         if not force_refresh and _CACHE_FILE.exists():
             try:
                 self._load_from_cache()
                 return
             except Exception:
-                logger.warning("交易日历缓存读取失败，尝试从 akshare 拉取")
+                logger.warning("缓存损坏，重新生成")
 
-        try:
-            self._fetch_from_akshare()
+        # 2. force_refresh=True → 尝试网络拉取
+        if force_refresh:
+            try:
+                self._fetch_from_akshare()
+                self._save_to_cache()
+                return
+            except Exception as e:
+                logger.error("网络拉取失败: %s", e)
+                if _CACHE_FILE.exists():
+                    logger.warning("回退到本地缓存")
+                    self._load_from_cache()
+                    return
+                # 网络失败且无缓存 → 继续到步骤3
+
+        # 3. 使用估算日历并保存到缓存（确保下次不再试网络）
+        if offline_ok:
+            logger.info("使用内置估算日历（周一至周五）")
+            self._build_estimated_calendar()
             self._save_to_cache()
-        except Exception:
-            if _CACHE_FILE.exists():
-                logger.warning("akshare 拉取失败，回退到本地缓存")
-                self._load_from_cache()
-            elif offline_ok:
-                logger.warning("akshare 不可用且无缓存，使用内置估算日历")
-                self._build_estimated_calendar()
-            else:
-                raise
+        else:
+            raise RuntimeError(
+                "交易日历不可用：无本地缓存且 offline_ok=False。"
+                "请先连网调用 get_calendar(force_refresh=True) 拉取。"
+            )
 
     def _load_from_cache(self) -> None:
         """从本地 Parquet 缓存加载。"""
@@ -161,32 +178,20 @@ class TradingCalendar:
         self._trading_days_sorted = sorted(self._trading_days)
 
     def _fetch_from_akshare(self) -> None:
-        """从 akshare 拉取A股交易日历。"""
-        try:
-            import akshare as ak
+        """从 akshare 拉取A股交易日历（仅在 force_refresh=True 时调用）。"""
+        import akshare as ak
 
-            df = ak.tool_trade_date_hist_sina()
-            df.columns = ["trade_date"]
-            self._trading_days = {
-                d.date() for d in pd.to_datetime(df["trade_date"])
-                if _CACHE_YEAR_RANGE[0] <= d.year <= _CACHE_YEAR_RANGE[1]
-            }
-            self._trading_days_sorted = sorted(self._trading_days)
-            logger.info(
-                "从 akshare 拉取交易日历完成：%d 个交易日",
-                len(self._trading_days_sorted),
-            )
-        except Exception as e:
-            logger.error("从 akshare 拉取交易日历失败: %s", e)
-            # 如果拉取失败但缓存存在，回退到缓存
-            if _CACHE_FILE.exists():
-                logger.warning("回退到本地交易日历缓存")
-                self._load_from_cache()
-            else:
-                raise RuntimeError(
-                    "无法获取交易日历：akshare 拉取失败且本地无缓存，"
-                    "请检查网络连接后重试"
-                ) from e
+        df = ak.tool_trade_date_hist_sina()
+        df.columns = ["trade_date"]
+        self._trading_days = {
+            d.date() for d in pd.to_datetime(df["trade_date"])
+            if _CACHE_YEAR_RANGE[0] <= d.year <= _CACHE_YEAR_RANGE[1]
+        }
+        self._trading_days_sorted = sorted(self._trading_days)
+        logger.info(
+            "从 akshare 拉取交易日历完成：%d 个交易日",
+            len(self._trading_days_sorted),
+        )
 
     def _build_estimated_calendar(self) -> None:
         """离线模式下构建估算日历：周一至周五排除元旦/春节/国庆等粗略处理。"""

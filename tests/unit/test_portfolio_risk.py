@@ -184,10 +184,11 @@ class TestKelly:
     def test_f_star_positive(self) -> None:
         from core.portfolio.kelly import KellyCalculator
         kc = KellyCalculator()
-        # 正收益 → 正仓位
-        returns = pd.Series(np.random.normal(0.001, 0.02, 252))
+        # 构造确定性的正收益序列（避免随机生成导致的偶然失败）
+        rng = np.random.default_rng(42)
+        returns = pd.Series(rng.normal(0.002, 0.015, 252))
         f = kc.calculate_f_star(returns)
-        assert f > 0
+        assert f > 0, f"f*={f} 应该为正"
 
     def test_short_series_returns_zero(self) -> None:
         from core.portfolio.kelly import KellyCalculator
