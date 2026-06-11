@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
-PYTHON_BIN="${PYTHON_BIN:-$(which python3 2>/dev/null || which python 2>/dev/null)}"
+PYTHON_BIN="${PYTHON_BIN:-$(which python 2>/dev/null || which python 2>/dev/null)}"
 
 echo ""
 echo "╔══════════════════════════════════════════╗"

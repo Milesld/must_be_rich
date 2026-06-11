@@ -185,32 +185,54 @@ class ConfigDrivenStrategy:
 # ══════════════════════════════════════════════════════════════
 
 _DEFAULT_CODES = [
-    # 大盘蓝筹
-    "600519", "000858", "000568",  # 白酒
-    "601318", "601628",            # 保险
-    "600036", "601398", "000001",  # 银行
-    "601166",                      # 兴业
-    # 新能源
-    "300750", "002594",            # 宁德、比亚迪
-    "601012", "688223",            # 隆基、晶科
-    # 医药
-    "600276", "300760",            # 恒瑞、迈瑞
-    "300122",                      # 智飞
-    # 科技
-    "002415", "688981",            # 海康、中芯
-    "603501",                      # 韦尔
-    # 消费
-    "000333", "600887",            # 美的、伊利
-    "002714",                      # 牧原
-    # 地产/基建
-    "000002", "601668",            # 万科、中建
-    # 交通运输
-    "600009", "601111",            # 上海机场、国航
-    # 化工/有色
-    "600309", "603799",            # 万华、华友
-    # 中小市值
-    "002230", "300124",            # 科大讯飞、汇川
-    "002475", "300274",            # 立讯、阳光电源
+    # === 大金融（银行/保险/券商）===
+    "600036", "601398", "601939", "601288", "000001",  # 招行、工行、建行、农行、平安银行
+    "601166", "600016", "601818",                        # 兴业、民生、光大
+    "601318", "601628", "601601",                        # 中国平安、人寿、太保
+    "600030", "601688", "000776",                        # 中信、华泰、广发证券
+    # === 白酒/食品饮料 ===
+    "600519", "000858", "000568", "002304", "600809",    # 茅台、五粮液、泸州老窖、洋河、汾酒
+    "600887", "002714", "000895",                         # 伊利、牧原、双汇
+    # === 新能源（电池/光伏/风电）===
+    "300750", "002594", "601012",                        # 宁德、比亚迪、隆基
+    "688223", "300274", "688599",                        # 晶科、阳光电源、天合光能
+    "002459", "300763",                                   # 晶澳科技、锦浪科技
+    # === 医药生物 ===
+    "600276", "300760", "300122",                        # 恒瑞、迈瑞、智飞
+    "600436", "000538", "300015",                         # 片仔癀、云南白药、爱尔眼科
+    "603259", "300347", "000963",                         # 药明康德、泰格医药、华东医药
+    # === 半导体/芯片 ===
+    "688981", "002415", "603501",                        # 中芯国际、海康、韦尔股份
+    "002049", "603986", "300782",                         # 紫光国微、兆易创新、卓胜微
+    "600703", "002371",                                   # 三安光电、北方华创
+    # === 消费电子/家电 ===
+    "000333", "002475", "300124",                        # 美的、立讯精密、汇川技术
+    "000651", "002241", "600690",                         # 格力电器、歌尔股份、海尔智家
+    # === 房地产/建材/基建 ===
+    "000002", "001979", "600048",                         # 万科、招商蛇口、保利
+    "600585", "601668", "600031",                         # 海螺水泥、中国建筑、三一重工
+    # === 交通运输/物流 ===
+    "600009", "601111", "601816",                         # 上海机场、国航、京沪高铁
+    "600029", "601006", "600233",                         # 南方航空、大秦铁路、圆通速递
+    # === 化工/有色/钢铁 ===
+    "600309", "000792", "600426",                         # 万华化学、盐湖股份、华鲁恒升
+    "603799", "000630", "600019",                         # 华友钴业、铜陵有色、宝钢股份
+    "601899", "603993",                                   # 紫金矿业、洛阳钼业
+    # === 汽车/机械 ===
+    "600104", "601633", "000625",                         # 上汽集团、长城汽车、长安汽车
+    "601238", "000338", "600660",                         # 广汽集团、潍柴动力、福耀玻璃
+    # === 电力/公用事业 ===
+    "600900", "600025", "600011",                         # 长江电力、华能水电、浙能电力
+    "003816", "601985",                                   # 中国广核、中核集团
+    # === 通信/计算机 ===
+    "000063", "600050", "002230",                         # 中兴通讯、中国联通、科大讯飞
+    "300033", "300454",                                   # 同花顺、深信服
+    # === 军工/国防 ===
+    "600893", "600760", "002013",                         # 航发动力、中航沈飞、中航机电
+    # === 农业/养殖 ===
+    "000876", "002311", "300498",                         # 新希望、海大集团、温氏股份
+    # === 传媒/娱乐 ===
+    "300413", "002027", "002624",                         # 芒果超媒、分众传媒、三七互娱（完美世界→三七互娱替代）
 ]
 
 
@@ -349,51 +371,6 @@ def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
             "is_suspended": False,
         }
     return out, "ok"
-
-
-def _gen_simulated_data(config: dict) -> dict[date, dict]:
-    """生成模拟数据（网络不可用时的降级方案）。"""
-    from core.common.calendar import get_calendar
-
-    sim = config.get("simulation", {})
-    num_stocks = sim.get("num_stocks", 100)
-    good_count = sim.get("good_stocks", 30)
-    drift_range = sim.get("good_drift_range", [0.0003, 0.0015])
-    vol_range = sim.get("vol_range", [0.015, 0.04])
-
-    cal = get_calendar()
-    start = _parse_date(config["backtest"]["start_date"])
-    end = _parse_date(config["backtest"]["end_date"])
-    trading_days = cal.get_trading_days(start, end)
-
-    logger.info(
-        "akshare 不可用，使用模拟数据 (%d只, %d个交易日, %d只是好股票)",
-        num_stocks, len(trading_days), good_count,
-    )
-
-    rng = np.random.default_rng(42)
-    result: dict[date, dict] = {}
-
-    good_codes = [f"600{i:03d}" for i in range(1, good_count + 1)]
-    normal_codes = [f"000{i:03d}" for i in range(1, num_stocks - good_count + 1)]
-
-    for codes, is_good in [(good_codes, True), (normal_codes, False)]:
-        for code in codes:
-            base = rng.uniform(8, 200)
-            drift = rng.uniform(*drift_range) if is_good else rng.uniform(-0.0005, 0.001)
-            vol = rng.uniform(*vol_range)
-            prices = base * np.cumprod(1 + rng.normal(drift, vol, len(trading_days)))
-            for i, td in enumerate(trading_days):
-                result.setdefault(td, {})[code] = {
-                    "open": prices[i] * 0.99, "high": prices[i] * 1.02,
-                    "low": prices[i] * 0.98, "close": prices[i],
-                    "pre_close": prices[i] * 0.99,
-                    "volume": 10_000_000, "amount": prices[i] * 10_000_000,
-                    "is_st": False, "is_suspended": False,
-                }
-
-    logger.info("模拟数据生成完成: %d 个交易日", len(result))
-    return result
 
 
 # ══════════════════════════════════════════════════════════════
@@ -622,8 +599,19 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
     raw_data, source_label = _load_real_data(config)
 
     if not raw_data or len(raw_data) < 100:
-        logger.info("真实数据不可用 (%s)，切换到模拟数据", source_label)
-        raw_data = _gen_simulated_data(config)
+        logger.error("=" * 60)
+        logger.error("无法加载真实数据！")
+        logger.error("  原因: %s", source_label)
+        logger.error("  已尝试拉取 %d 只股票: %s", len(_get_codes(config)), _get_codes(config)[:10])
+        logger.error("")
+        logger.error("  请检查:")
+        logger.error("    1. 网络是否正常: ping finance.sina.com.cn")
+        logger.error("    2. 配置文件: configs/strategy.yaml → data_source.provider")
+        logger.error("       sina  → 走新浪财经接口（当前）")
+        logger.error("       eastmoney → 走东方财富接口（备选）")
+        logger.error("    3. 单独测试: python -c \"import akshare as ak; print(ak.stock_zh_a_daily('sh600519','qfq').tail(3))\"")
+        logger.error("=" * 60)
+        return
 
     if not raw_data:
         logger.error("无可用数据，退出")

@@ -38,7 +38,7 @@ factors:
   # ═══ 技术面因子（14个）— core/features/technical.py ═══
   momentum_20d:
     enabled: true
-    weight: 0.6
+    weight: 0.7
     module: core.features.technical
     function: momentum
     params: {window: 20}
@@ -46,7 +46,7 @@ factors:
 
   volatility_20d:
     enabled: true
-    weight: 0.4
+    weight: 0.3
     module: core.features.technical
     function: volatility
     params: {window: 20}
@@ -568,13 +568,3 @@ trading_costs:
   slippage_gem_star: 0.003    # 创业板/科创板 0.3%
   slippage_small_cap: 0.005   # 小盘股（<50亿）0.5%
 
-# ── 模拟数据设置（网络不可用时的降级方案）──
-simulation:
-  # 生成的股票数量
-  num_stocks: 100
-  # 其中"好股票"数量（有正偏收益，策略应能选中来验证排序能力）
-  good_stocks: 30
-  # "好股票"日化漂移率范围（年化约7.5%~37.5%）
-  good_drift_range: [0.0003, 0.0015]
-  # 全部股票波动率范围
-  vol_range: [0.015, 0.04]

@@ -133,36 +133,45 @@ class TradingCalendar:
     # —— 内部方法 ——
 
     def _load(self, force_refresh: bool = False, offline_ok: bool = True) -> None:
-        """加载交易日历：缓存优先 → 失败则估算，不主动联网。
-
-        只在 force_refresh=True 时才尝试重新从网络拉取。
-        这是为了避免代理/防火墙环境下无限期卡死。
-        """
-        # 1. 缓存存在 → 直接用
+        """加载交易日历：先试网络拉取（5秒超时），失败则用缓存或估算。"""
+        # 1. 缓存存在且不强制刷新 → 直接用
         if not force_refresh and _CACHE_FILE.exists():
             try:
                 self._load_from_cache()
                 return
             except Exception:
-                logger.warning("缓存损坏，重新生成")
+                logger.warning("缓存损坏，尝试网络拉取")
 
-        # 2. force_refresh=True → 尝试网络拉取
-        if force_refresh:
+        # 2. 尝试网络拉取（5 秒超时，失败不卡住）
+        import threading
+
+        net_result: list = []
+        net_error: list = []
+
+        def _fetch_net():
             try:
                 self._fetch_from_akshare()
-                self._save_to_cache()
-                return
+                net_result.append(True)
             except Exception as e:
-                logger.error("网络拉取失败: %s", e)
-                if _CACHE_FILE.exists():
-                    logger.warning("回退到本地缓存")
-                    self._load_from_cache()
-                    return
-                # 网络失败且无缓存 → 继续到步骤3
+                net_error.append(str(e))
 
-        # 3. 使用估算日历并保存到缓存（确保下次不再试网络）
+        t = threading.Thread(target=_fetch_net, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+
+        if net_result:
+            # 网络拉取成功 → 保存缓存
+            self._save_to_cache()
+            return
+
+        # 3. 网络失败 → 回退
+        if net_error:
+            logger.info("交易日历网络拉取超时/失败(%s)，使用本地缓存或估算", net_error[0][:80])
+        if _CACHE_FILE.exists():
+            self._load_from_cache()
+            return
         if offline_ok:
-            logger.info("使用内置估算日历（周一至周五）")
+            logger.info("无缓存，使用估算日历（周一至周五）")
             self._build_estimated_calendar()
             self._save_to_cache()
         else:

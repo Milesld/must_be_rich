@@ -59,6 +59,7 @@ class TradeRecord:
     cost_breakdown: CostBreakdown | None = None
     status: str = "filled"    # filled / partial / rejected / unfilled
     reject_reason: Optional[str] = None
+    realized_pnl: float = 0.0  # 卖出时的已实现盈亏（买入时为0）
 
     def to_dict(self) -> dict:
         cb = self.cost_breakdown
@@ -274,8 +275,9 @@ class BacktestEngine:
             # 加载因子
             features = pd.DataFrame()
             if feature_loader is not None:
-                codes = list(self.positions.keys())
-                features = feature_loader(td, codes)
+                # 传递全市场股票代码（不仅是持仓的），使策略能在调仓日评估整个股票池
+                universe_codes = list(self.positions.keys()) + [c for c in daily_data.keys() if c not in self.positions]
+                features = feature_loader(td, universe_codes)
 
             # ── 盘中 ────────────────────────
             trade_intents = strategy.on_bar(
@@ -460,6 +462,9 @@ class BacktestEngine:
             # 卖出：增加现金（成交金额 - 佣金 - 印花税 - 过户费）
             self.cash += (amount - total_cost)
             old_shares = self.positions.get(record.code, 0)
+            avg_cost = self.position_costs.get(record.code, 0.0)
+            # 计算已实现盈亏 = 卖出净收入 - 卖出股数对应的成本
+            record.realized_pnl = (amount - total_cost) - (avg_cost * record.filled_shares)
             new_shares = old_shares - record.filled_shares
             if new_shares <= 0:
                 self.positions.pop(record.code, None)
@@ -661,11 +666,19 @@ class BacktestResult:
 
         # 交易统计
         filled_trades = [t for t in self.trades if t.status == "filled"]
-        winning = [t for t in filled_trades if t.side == "sell"]
-        # 简化：盈亏比通过交易记录计算
-        win_count = len(winning)
+        buys = [t for t in filled_trades if t.side == "buy"]
+        sells = [t for t in filled_trades if t.side == "sell"]
+
+        # 盈亏比：卖出时计算已实现盈亏
+        winning_sells = [t for t in sells if t.realized_pnl > 0]
+        losing_sells = [t for t in sells if t.realized_pnl <= 0]
+        win_count = len(winning_sells)
+        total_closed = len(sells)
+        win_rate = win_count / total_closed if total_closed > 0 else (None if total_closed == 0 else 0.0)
+
+        total_realized_pnl = sum(t.realized_pnl for t in sells)
+
         total_trades = len(filled_trades)
-        win_rate = win_count / total_trades if total_trades > 0 else 0.0
 
         # 成本统计
         total_cost = sum(
@@ -685,8 +698,13 @@ class BacktestResult:
             "max_drawdown": float(max_dd),
             "max_drawdown_date": str(max_dd_date) if max_dd_date else None,
             "calmar_ratio": float(annual_return / abs(max_dd)) if max_dd < 0 else 0.0,
-            "win_rate": float(win_rate),
+            "win_rate": float(win_rate) if win_rate is not None else "N/A (无已平仓交易)",
             "total_trades": total_trades,
+            "n_buys": len(buys),
+            "n_sells": len(sells),
+            "winning_sells": win_count,
+            "losing_sells": len(losing_sells),
+            "total_realized_pnl": float(total_realized_pnl),
             "total_cost": float(total_cost),
             "total_cost_pct": float(total_cost / self.initial_capital) if self.initial_capital > 0 else 0.0,
         }
