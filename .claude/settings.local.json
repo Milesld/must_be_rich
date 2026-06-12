@@ -10,7 +10,10 @@
       "Bash(Path\" | head -10 && echo \"===\" && grep -rn \"data/\\\\|~/\\\\.\\\\|\\\\.parquet\" /Users/lidong/projects/claude/must_be_rich/core/backtest/engine.py | head -10)",
       "Read(//private/var/run/**)",
       "Bash(scutil --dns)",
-      "Bash(python -c \"from core.common.calendar import TradingCalendar; cal = TradingCalendar\\(offline_ok=True\\); print\\(f'OK: {len\\(cal.all_trading_days\\)} days'\\)\")"
+      "Bash(python -c \"from core.common.calendar import TradingCalendar; cal = TradingCalendar\\(offline_ok=True\\); print\\(f'OK: {len\\(cal.all_trading_days\\)} days'\\)\")",
+      "Bash(python -c \"import yaml; d=yaml.safe_load\\(open\\('configs/strategy.yaml'\\)\\); print\\('YAML OK'\\); print\\(f'{len\\(d[\\\\\"factors\\\\\"]\\)} factors'\\)\")",
+      "Bash(python -c \"from research.factor_optimizer import FACTOR_POOL, optimize; print\\('optimizer OK'\\)\")",
+      "Bash(python -m pytest tests/unit/test_engine.py -q --tb=line)"
     ]
   }
 }

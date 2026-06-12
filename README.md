@@ -84,28 +84,42 @@ python -m pytest tests/ -q    # 全部测试（248个）
 
 ### 配置驱动模式
 
-**所有参数集中在一个文件** — `configs/strategy.yaml`。修改后重跑即可，无需改代码。
+所有参数集中在 `configs/strategy.yaml`，修改后重跑即可生效：
 
 ```bash
-# 跑回测（默认配置）
+python research/run_backtest_demo.py                # 默认配置
+python research/run_backtest_demo.py configs/my.yaml # 自定义配置
+```
+
+### 三种用法（按复杂度递进）
+
+```bash
+# ① 手工调参 — 改 YAML → 跑回测
+vim configs/strategy.yaml
 python research/run_backtest_demo.py
 
-# 使用自定义配置
-python research/run_backtest_demo.py configs/strategy.yaml
+# ② 自动搜索 — 逐个加因子看增量效果
+python research/factor_optimizer.py --task long_term --rounds 100
+
+# ③ 安装 optuna 后性能更强（TPE自适应搜索，收敛快3~10倍）
+pip install optuna
+python research/factor_optimizer.py --task long_term --rounds 200
 ```
 
-**调参示例**：在 `configs/strategy.yaml` 中把 RSI 启用：
+### 不同任务如何选因子
 
-```yaml
-factors:
-  rsi_14:
-    enabled: true   # 改为 true
-    weight: 0.3     # 设权重
-```
+不同任务的收益驱动因素不同，应使用不同的因子池：
 
-保存后 `python research/run_backtest_demo.py` 重跑，输出会显示 3 个因子已生效。
+| 任务 | 命令 | 因子池 | 说明 |
+|------|------|--------|------|
+| **长期选股** | `--task long_term` | 30个（基本面+长动量+质量） | 月频、低噪声，估值/成长/ROE预测力最强 |
+| **盘前推荐** | `--task premarket` | 16个（隔夜信号+竞价+NLP） | 日频、竞价和隔夜海外是增量信息 |
+| **日内预测** | `--task intraday` | 19个（盘口+短动量+量价） | 分钟级、量比/RSI/布林带最敏感 |
+| 不限任务 | 不传 `--task` | 全部技术面 | 探索性质 |
 
-### 当前 demo 用到的因子（2个，可随时启用更多）
+**原则**：不要把高频因子用于月频策略（是噪声），也不要把基本面用于分钟策略（没变化）。
+
+### 当前 demo 启用的因子（2个，可通过 optimizer 自动寻找更好的组合）
 
 | 因子 | 代码位置 | 计算方式 |
 |------|---------|---------|

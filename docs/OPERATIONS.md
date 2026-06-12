@@ -47,18 +47,19 @@ python research/run_backtest_demo.py
 适合：因子研究、策略回测、模型训练、盘前推荐验证。
 
 ```bash
-# 跑一次回测
+# 跑一次回测（用 configs/strategy.yaml 中的配置）
 python research/run_backtest_demo.py
 
-# 交互式因子分析
-python -c "
-from core.features.registry import FactorRegistry
-from core.models.evaluation import ModelEvaluator
-...
-"
+# 因子自动优化 — 搜索最优因子组合和权重
+# Optuna TPE 自适应搜索（推荐，收敛快）
+python research/factor_optimizer.py --task long_term --rounds 200
+# 随机搜索（无 optuna 时自动回退）
+python research/factor_optimizer.py --task long_term --rounds 100
 
-# 手动触发盘前推荐（需要前一日数据）
-python -m services.premarket_service.main
+# 不同任务用不同的因子池
+python research/factor_optimizer.py --task long_term    # 长期选股（30个因子）
+python research/factor_optimizer.py --task premarket    # 盘前推荐（16个因子）
+python research/factor_optimizer.py --task intraday     # 日内预测（19个因子）
 ```
 
 **数据流向**：akshare 在线拉取 → 内存中 → 直接回测/模型推理。数据不会写入数据库。
