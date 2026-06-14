@@ -1,174 +1,191 @@
 # ══════════════════════════════════════════════════════════
-# 策略配置文件 — 所有可调参数集中于此
-# 修改后运行 python research/run_backtest_demo.py 即可生效
+# 策略配置文件
 # ══════════════════════════════════════════════════════════
 
-# ── 回测设置 ──────────────────────────────
 backtest:
   start_date: "2024-01-02"
-  end_date: "2025-12-31"
-  initial_capital: 1_000_000       # 初始资金（元）
+  end_date: "2025-05-12"
+  initial_capital: 1000000
 
-# ── 数据源 ────────────────────────────────
 data_source:
-  # 数据提供方：sina / eastmoney（akshare底层接口）
   provider: sina
-  # 股票池（98只蓝筹，覆盖18个行业）。删减股票直接删行即可
-  # 行业注释仅作说明，实际为连续列表
   codes:
-    # -- 大金融 --
+    # ── 大金融 ──
     - "600036"    # 招商银行
     - "601398"    # 工商银行
-    - "601939"    # 建设银行
-    - "601288"    # 农业银行
-    - "000001"    # 平安银行
-    - "601166"    # 兴业银行
-    - "600016"    # 民生银行
-    - "601818"    # 光大银行
     - "601318"    # 中国平安
-    - "601628"    # 中国人寿
-    - "601601"    # 中国太保
     - "600030"    # 中信证券
-    - "601688"    # 华泰证券
-    - "000776"    # 广发证券
-    # -- 白酒/食品 --
+    # ── 白酒/食品 ──
     - "600519"    # 贵州茅台
     - "000858"    # 五粮液
     - "000568"    # 泸州老窖
-    - "002304"    # 洋河股份
-    - "600809"    # 山西汾酒
     - "600887"    # 伊利股份
     - "002714"    # 牧原股份
-    - "000895"    # 双汇发展
-    # -- 新能源 --
+    # ── 新能源 ──
     - "300750"    # 宁德时代
     - "002594"    # 比亚迪
     - "601012"    # 隆基绿能
-    - "688223"    # 晶科能源
-    - "300274"    # 阳光电源
-    - "688599"    # 天合光能
-    - "002459"    # 晶澳科技
-    - "300763"    # 锦浪科技
-    # -- 医药 --
+    # ── 医药 ──
     - "600276"    # 恒瑞医药
     - "300760"    # 迈瑞医疗
-    - "300122"    # 智飞生物
-    - "600436"    # 片仔癀
-    - "000538"    # 云南白药
-    - "300015"    # 爱尔眼科
     - "603259"    # 药明康德
-    - "300347"    # 泰格医药
-    - "000963"    # 华东医药
-    # -- 半导体 --
+    # ── 半导体/科技 ──
     - "688981"    # 中芯国际
     - "002415"    # 海康威视
     - "603501"    # 韦尔股份
     - "002049"    # 紫光国微
-    - "603986"    # 兆易创新
-    - "300782"    # 卓胜微
-    - "600703"    # 三安光电
-    - "002371"    # 北方华创
-    # -- 消费电子/家电 --
+    # ── 消费电子/家电 ──
     - "000333"    # 美的集团
     - "002475"    # 立讯精密
-    - "300124"    # 汇川技术
     - "000651"    # 格力电器
-    - "002241"    # 歌尔股份
-    - "600690"    # 海尔智家
-    # -- 房地产/建材/基建 --
+    # ── 房地产/建材 ──
     - "000002"    # 万科A
-    - "001979"    # 招商蛇口
-    - "600048"    # 保利发展
     - "600585"    # 海螺水泥
     - "601668"    # 中国建筑
     - "600031"    # 三一重工
-    # -- 交通/物流 --
+    # ── 交通/物流 ──
     - "600009"    # 上海机场
     - "601111"    # 中国国航
     - "601816"    # 京沪高铁
-    - "600029"    # 南方航空
-    - "601006"    # 大秦铁路
-    - "600233"    # 圆通速递
-    # -- 化工/有色 --
+    # ── 化工/有色 ──
     - "600309"    # 万华化学
-    - "000792"    # 盐湖股份
-    - "600426"    # 华鲁恒升
-    - "603799"    # 华友钴业
-    - "000630"    # 铜陵有色
-    - "600019"    # 宝钢股份
     - "601899"    # 紫金矿业
-    - "603993"    # 洛阳钼业
-    # -- 汽车/机械 --
+    # ── 汽车/机械 ──
     - "600104"    # 上汽集团
     - "601633"    # 长城汽车
-    - "000625"    # 长安汽车
-    - "601238"    # 广汽集团
-    - "000338"    # 潍柴动力
     - "600660"    # 福耀玻璃
-    # -- 电力/公用事业 --
+    # ── 电力 ──
     - "600900"    # 长江电力
     - "600025"    # 华能水电
-    - "600011"    # 浙能电力
-    - "003816"    # 中国广核
-    - "601985"    # 中国核电
-    # -- 通信/计算机 --
+    # ── 通信/计算机 ──
     - "000063"    # 中兴通讯
-    - "600050"    # 中国联通
     - "002230"    # 科大讯飞
-    - "300033"    # 同花顺
-    - "300454"    # 深信服
-    # -- 军工 --
+    # ── 军工 ──
     - "600893"    # 航发动力
     - "600760"    # 中航沈飞
-    - "002013"    # 中航机电
-    # -- 农业 --
-    - "000876"    # 新希望
+    # ── 农业 ──
     - "002311"    # 海大集团
     - "300498"    # 温氏股份
-    # -- 传媒 --
+    # ── 传媒 ──
     - "300413"    # 芒果超媒
     - "002027"    # 分众传媒
-    - "002624"    # 完美世界
-  # 拉取数据提前多少天（用于因子计算滚动窗口）
+    # ── AI芯片设计 ──
+    - "688256"    # 寒武纪
+    - "688041"    # 海光信息
+    - "688047"    # 龙芯中科
+    - "688008"    # 澜起科技
+    - "688521"    # 芯原股份
+    - "300474"    # 景嘉微
+    - "688608"    # 恒玄科技
+    - "688099"    # 晶晨股份
+    # ── AI半导体设备 ──
+    - "688012"    # 中微公司
+    - "688072"    # 拓荆科技
+    - "688200"    # 华峰测控
+    - "688120"    # 华海清科
+    - "688037"    # 芯源微
+    - "688082"    # 盛美半导体
+    - "688361"    # 中科飞测
+    - "300604"    # 长川科技
+    # ── AI晶圆制造/封测 ──
+    - "688396"    # 华润微
+    - "688126"    # 沪硅产业
+    - "688234"    # 天岳先进
+    - "002156"    # 通富微电
+    - "600584"    # 长电科技
+    - "002185"    # 华天科技
+    - "688525"    # 佰维存储
+    # ── AI算力/服务器 ──
+    - "000977"    # 浪潮信息
+    - "603019"    # 中科曙光
+    - "688111"    # 金山办公
+    - "300418"    # 昆仑万维
+    - "688568"    # 中科星图
+    # ── AI光模块/光通信 ──
+    - "300308"    # 中际旭创
+    - "300502"    # 新易盛
+    - "300394"    # 天孚通信
+    - "688498"    # 源杰科技
+    - "688205"    # 德科立
+    # ── AI应用/软件 ──
+    - "688088"    # 虹软科技
+    - "300624"    # 万兴科技
+    - "688787"    # 海天瑞声
+    - "688369"    # 致远互联
+    # ── AI存储芯片 ──
+    - "688385"    # 复旦微电
+    - "603160"    # 汇顶科技
+    - "688110"    # 东芯股份
+    # ── AI数据中心 ──
+    - "300383"    # 光环新网
+    - "603881"    # 数据港
+    - "301236"    # 软通动力
+    - "688316"    # 青云科技
+    # ── 机器人/精密制造 ──
+    - "688017"    # 绿的谐波
+    - "603728"    # 鸣志电器
+    - "300024"    # 机器人
+    - "688165"    # 埃夫特
+    - "002747"    # 埃斯顿
+    - "688320"    # 禾川科技
+    - "002979"    # 雷赛智能
+    - "300124"    # 汇川技术
+    - "300450"    # 先导智能
+    - "300316"    # 晶盛机电
+    - "002008"    # 大族激光
+    - "300751"    # 迈为股份
+    - "688333"    # 铂力特
+    # ── 电力/能源 ──
+    - "600406"    # 国电南瑞
+    - "601877"    # 正泰电器
+    - "002129"    # TCL中环
+    - "600438"    # 通威股份
+    - "688599"    # 天合光能
+    - "300274"    # 阳光电源
+    - "003816"    # 中国广核
+    - "601985"    # 中国核电
+    # ── 苹果供应链 ──
+    - "300433"    # 蓝思科技
+    - "002456"    # 欧菲光
+    - "002600"    # 领益智造
+    - "601231"    # 环旭电子
+    - "300136"    # 信维通信
+    - "002241"    # 歌尔股份
+    - "002635"    # 安洁科技
+    - "601138"    # 工业富联
   lookback_days: 400
 
-# ── 策略参数 ──────────────────────────────
 strategy:
-  # 持仓数量
   top_n: 5
-  # 调仓频率：monthly / weekly / daily
-  rebalance_frequency: weekly # monthly
-  # 买入时的最小股数（低于此值跳过）
+  rebalance_frequency: monthly
   min_shares: 100
-  # 组合优化器：equal_weight / signal_weighted / inverse_vol_weight / risk_parity / min_cvar
   optimizer: equal_weight
 
-# ── 因子配置 ──────────────────────────────
-# enabled=true 的因子才会参与评分
-# weight 是该因子在综合评分中的权重，所有已启用因子的 weight 会被自动归一化（不需要手动凑到1.0）
-# description 仅为注释说明，程序不读取
-factors:
+regime:
+  enabled: true
+  min_position_ratio: 0.3
+  max_position_ratio: 0.9
 
-  # ═══ 技术面因子（14个）— core/features/technical.py ═══
+factors:
   momentum_20d:
     enabled: true
-    weight: 0.7
+    weight: 0.009
     module: core.features.technical
     function: momentum
     params: {window: 20}
     description: "20日累计收益率"
 
   volatility_20d:
-    enabled: true
-    weight: 0.3
+    enabled: false
+    weight: 0.0
     module: core.features.technical
     function: volatility
     params: {window: 20}
     description: "20日年化波动率（反转：低波动→高分）"
 
   momentum_60d:
-    enabled: false
-    weight: 0.0
+    enabled: true
+    weight: 0.7103
     module: core.features.technical
     function: momentum
     params: {window: 60}
@@ -199,16 +216,16 @@ factors:
     description: "14日平均真实波幅（衡量波动幅度）"
 
   turnover_5d:
-    enabled: false
-    weight: 0.0
+    enabled: true
+    weight: 0.2028
     module: core.features.technical
     function: turnover
     params: {window: 5}
     description: "5日平均换手率（活跃度指标）"
 
   turnover_20d:
-    enabled: false
-    weight: 0.0
+    enabled: true
+    weight: 0.05
     module: core.features.technical
     function: turnover
     params: {window: 20}
@@ -223,8 +240,8 @@ factors:
     description: "当日成交量/20日均量（放量/缩量信号）"
 
   amihud_illiq:
-    enabled: false
-    weight: 0.0
+    enabled: true
+    weight: 0.028
     module: core.features.technical
     function: amihud_illiq
     params: {window: 20}
@@ -243,7 +260,7 @@ factors:
     weight: 0.0
     module: core.features.technical
     function: macd_dif
-    params: {fast: 12, slow: 26, signal: 9}
+    params: {fast: 12, signal: 9, slow: 26}
     description: "MACD快慢线差值（DIF）"
 
   macd_dea:
@@ -251,7 +268,7 @@ factors:
     weight: 0.0
     module: core.features.technical
     function: macd_dea
-    params: {fast: 12, slow: 26, signal: 9}
+    params: {fast: 12, signal: 9, slow: 26}
     description: "MACD信号线（DEA）"
 
   macd_hist:
@@ -259,7 +276,7 @@ factors:
     weight: 0.0
     module: core.features.technical
     function: macd_hist
-    params: {fast: 12, slow: 26, signal: 9}
+    params: {fast: 12, signal: 9, slow: 26}
     description: "MACD柱状图（DIF-DEA）×2"
 
   bollinger_position:
@@ -267,7 +284,7 @@ factors:
     weight: 0.0
     module: core.features.technical
     function: bollinger_position
-    params: {window: 20, num_std: 2}
+    params: {num_std: 2, window: 20}
     description: "布林带位置（0=下轨, 0.5=中轨, 1=上轨）"
 
   ma_alignment:
@@ -275,13 +292,9 @@ factors:
     weight: 0.0
     module: core.features.technical
     function: ma_alignment
-    params: {short: 5, mid: 20, long: 60}
+    params: {long: 60, mid: 20, short: 5}
     description: "均线多空排列评分（+1多头, 0交叉, -1空头）"
 
-  # ═══ 基本面因子（19个）— core/features/fundamental.py ═══
-  # ★ 注意：基本面因子需要加载财报数据（financial_statements表或API）
-  # ★ 当前 demo 模式下，这些因子返回中性值0.0
-  # ★ 全部支持 Point-in-Time 模式（防前视偏差）
   pe_ttm:
     enabled: false
     weight: 0.0
@@ -434,8 +447,6 @@ factors:
     params: {point_in_time: true}
     description: "自由现金流/市值"
 
-  # ═══ 资金面因子（7个）— core/features/capital_flow.py ═══
-  # ★ 注意：资金面因子需要额外加载两融/龙虎榜/北向数据
   main_force_net_inflow_5d:
     enabled: false
     weight: 0.0
@@ -500,8 +511,6 @@ factors:
     params: {}
     description: "距下次限售解禁天数（反转：越近越危险→低分）"
 
-  # ═══ 情绪/事件因子（8个）— core/features/sentiment.py ═══
-  # ★ 注意：大部分需要全市场聚合数据
   limit_up_count:
     enabled: false
     weight: 0.0
@@ -566,8 +575,6 @@ factors:
     params: {}
     description: "业绩预告超预期量化（大增=+2, 扭亏=+3, 首亏=-3）"
 
-  # ═══ 盘前专属因子（10个）— core/features/premarket.py ═══
-  # ★ 注意：盘前因子用于盘前推荐子系统，需要隔夜海外市场/公告/竞价数据
   overnight_adr_mapped:
     enabled: false
     weight: 0.0
@@ -647,38 +654,4 @@ factors:
     function: days_to_next_event
     params: {}
     description: "距下一重大事件（业绩披露/股东大会/限售解禁）的剩余天数"
-
-# ── 因子计算通用设置 ─────────────────────
-factor_settings:
-  # 计算因子时的回看窗口（交易日数）
-  lookback_window: 60
-  # 最小有效价格点数（不足则跳过该股票）
-  min_price_points: 22
-
-# ── 退出/风控设置 ─────────────────────────
-exit_rules:
-  # 是否启用退出监控（true启用，false跳过）
-  enabled: false
-  # 止损：ATR倍数止损（当前价 ≤ 入场价 - N×ATR）
-  stop_loss_atr_mult: 2.0
-  # 止损：固定比例止损（当前价 ≤ 入场价 × (1 - pct)）
-  stop_loss_pct: 0.08
-  # 止盈：目标收益率（当前价 ≥ 入场价 × (1 + target)）
-  take_profit_target: 0.20
-  # 移动止盈：从持仓期间最高点回撤超过此比例即卖
-  trailing_stop_pct: 0.10
-  # 时间止损：持有超过N天仍未盈利→退出
-  max_hold_days: 60
-
-# ── 佣金/费用设置 ─────────────────────────
-# 覆盖 system.yaml 中的默认值
-trading_costs:
-  commission_rate: 0.00015    # 佣金率（万1.5）
-  stamp_duty_rate: 0.0005     # 印花税（0.05%，仅卖方）
-  min_commission: 5.0         # 最低佣金（元/笔）
-  # 滑点估算（按流动性分层）
-  slippage_csi800: 0.001      # 中证800成分股 0.1%
-  slippage_main: 0.002        # 其他主板 0.2%
-  slippage_gem_star: 0.003    # 创业板/科创板 0.3%
-  slippage_small_cap: 0.005   # 小盘股（<50亿）0.5%
 

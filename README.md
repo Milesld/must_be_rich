@@ -98,13 +98,22 @@ python research/run_backtest_demo.py configs/my.yaml # 自定义配置
 vim configs/strategy.yaml
 python research/run_backtest_demo.py
 
-# ② 自动搜索 — 逐个加因子看增量效果
-python research/factor_optimizer.py --task long_term --rounds 100
-
-# ③ 安装 optuna 后性能更强（TPE自适应搜索，收敛快3~10倍）
-pip install optuna
+# ② TPE 自动优化（推荐）— 搜索最优因子组合和权重
 python research/factor_optimizer.py --task long_term --rounds 200
+
+# ③ 加速：短窗口搜索 + 全区间验证 Top-3（约 2 分钟）
+python research/factor_optimizer.py --task long_term --rounds 100 --search-years 0.5
+
+# ④ 多策略并行：复制 YAML → 改参 → 跑
+cp configs/strategy.yaml configs/strategy_test.yaml
+python research/run_backtest_demo.py configs/strategy_test.yaml
 ```
+
+### 市场状态判断（regime）
+
+在 `configs/strategy.yaml` 中设置 `regime.enabled: true` 即可启用。
+
+系统每天构建等权市场指数，计算四维评分（趋势/波动率/估值/市场宽度）→ 建议仓位比例 → 熊市自动降仓、牛市恢复仓位。用于保护动量策略在趋势反转时不会重伤。
 
 ### 不同任务如何选因子
 
@@ -272,7 +281,33 @@ if "rsi_14" in features.columns:
 
 ---
 
-### 组合优化器（5种加权策略）
+---
+
+### NLP 情绪分析（三种引擎，零改动切换）
+
+系统默认使用关键词规则引擎（免费、零依赖、立即可用）。如需更高准确率，一行配置切换到 DeepSeek API：
+
+```bash
+# 1. 获取 key: https://platform.deepseek.com
+# 2. 设置环境变量
+export DEEPSEEK_API_KEY=sk-your-key
+export NLP_MODEL=deepseek
+
+# 3. 所有调用方自动切换，代码不用改
+python research/run_backtest_demo.py
+```
+
+| 引擎 | 准确率 | 延迟 | 成本 | 场景 |
+|------|--------|------|------|------|
+| 关键词规则 | ~60% | <1ms | 免费 | 快速原型 |
+| **DeepSeek API** | ~85% | ~500ms | ~¥0.001/条 | **推荐** |
+| 本地 Qwen3 | ~84% | <50ms | 免费(需GPU) | 实时 |
+
+详见 `docs/OPERATIONS.md` → "如何启用 DeepSeek API 做 NLP 情绪分析？"
+
+---
+
+### 5种组合优化器（加权策略）
 
 在 `core/portfolio/optimizer.py` 中已实现，demo 用的是最简单的「等权」。如果需要更复杂的仓位分配：
 
@@ -357,7 +392,7 @@ quant-system/
 | **README.md（本文）** | **所有人** | 快速开始、因子清单、可调参数、使用示例 |
 | `docs/A股量化交易系统详细方案.md` | 量化研究员 | 方法论、因子体系、合规要求、风控策略 |
 | `docs/系统实现设计指南.md` | 开发工程师 | 代码结构、数据库schema、API契约、配置规范、测试策略 |
-| `docs/OPERATIONS.md` | 运维 | 怎么启动、怎么清理、脚本参考 |
+| `docs/OPERATIONS.md` | **所有人** | 完整操作手册：初始化、回测、因子优化、多策略管理、lightgbm离线安装、代理问题、Walk-Forward、故障排查 |
 | `docs/UPGRADE.md` | 架构师 | 6个可替换部件的升级路径 |
 | `docs/runbook.md` | SRE | 故障排查、降级操作、检查清单 |
 

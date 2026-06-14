@@ -102,8 +102,10 @@ class MarketRegimeDetector:
         if market_data is None or market_data.empty:
             return RegimeResult()
 
-        # 确保数据截止于 as_of_date
-        df = market_data[market_data.index <= pd.Timestamp(as_of_date)].copy()
+        # 确保数据截止于 as_of_date（统一转为 Timestamp 比较）
+        ts_index = pd.to_datetime(market_data.index)
+        cutoff = pd.Timestamp(as_of_date)
+        df = market_data.loc[ts_index <= cutoff].copy()
         if df.empty:
             return RegimeResult()
 

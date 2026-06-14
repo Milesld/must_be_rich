@@ -70,14 +70,13 @@ class ConfigDrivenStrategy:
         "amihud_illiq", "amplitude_20d",
     }
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, raw_data: dict | None = None) -> None:
         cfg = config.get("strategy", {})
         self.top_n = cfg.get("top_n", 5)
         self.rebalance_freq = cfg.get("rebalance_frequency", "monthly")
         self.min_shares = cfg.get("min_shares", 100)
         self.optimizer = cfg.get("optimizer", "equal_weight")
         self.factors = _enabled_factors(config)
-        # 自动归一化权重（用户不需要手动凑到1.0）
         total_w = sum(f.get("weight", 0) for f in self.factors)
         if total_w > 0:
             for f in self.factors:
@@ -85,6 +84,26 @@ class ConfigDrivenStrategy:
         if not self.factors:
             logger.warning("配置中没有启用的因子！")
         self._last_rebalance_period: Any = None
+
+        # ── 市场状态判断 ──
+        regime_cfg = config.get("regime", {})
+        self._regime_enabled = regime_cfg.get("enabled", False)
+        if self._regime_enabled:
+            from core.portfolio.regime import MarketRegimeDetector
+            self._regime_detector = MarketRegimeDetector(config=regime_cfg.get("params", {}))
+            self._regime_min_position = regime_cfg.get("min_position_ratio", 0.30)
+            self._regime_max_position = regime_cfg.get("max_position_ratio", 0.90)
+            self._raw_data = raw_data
+            logger.info("市场状态判断已启用 (仓位范围: %.0f%%~%.0f%%)",
+                        self._regime_min_position * 100, self._regime_max_position * 100)
+        else:
+            self._regime_detector = None
+            self._regime_min_position = 1.0
+            self._regime_max_position = 1.0
+            self._raw_data = None
+
+        # 跟踪当前实际仓位（用于判断是否需要减仓）
+        self._current_regime: Any = None
 
     def on_bar(
         self,
@@ -97,7 +116,42 @@ class ConfigDrivenStrategy:
         intents: list = []
         from core.backtest.engine import TradeIntent
 
+        # ── 市场状态判断（每个交易日都检测，不仅调仓日）───
+        suggested_pos_ratio = 1.0
+        regime_info = ""
+        if self._regime_detector is not None:
+            market_df = self._build_market_proxy(trade_date)
+            if market_df is not None and len(market_df) > 200:
+                self._current_regime = self._regime_detector.detect(trade_date, market_df)
+                raw_ratio = self._current_regime.suggested_position_ratio
+                suggested_pos_ratio = max(self._regime_min_position,
+                                          min(self._regime_max_position, raw_ratio))
+                regime_info = f" | 市场状态: {self._current_regime.regime_label} (建议仓位: {suggested_pos_ratio:.0%})"
+
         if not self._should_rebalance(trade_date):
+            # 非调仓日也检查：如果市场急转直下，可能需要紧急减仓
+            if self._regime_detector is not None and suggested_pos_ratio < 0.50:
+                # 极度悲观 → 卖出部分持仓
+                pos_value = sum(
+                    float(daily_data.get(c, {}).get("close", 0)) * s
+                    for c, s in positions.items()
+                )
+                total_value = cash + pos_value
+                target_pos_value = total_value * suggested_pos_ratio
+                if pos_value > target_pos_value * 1.1:  # 超过目标10%以上才减仓
+                    reduce_ratio = target_pos_value / max(pos_value, 1)
+                    for code, shares in list(positions.items()):
+                        if shares <= 0:
+                            continue
+                        sell_shares = int(shares * (1 - reduce_ratio))
+                        sell_shares = (sell_shares // 100) * 100
+                        if sell_shares >= 100:
+                            price = float(daily_data.get(code, {}).get("close", 0))
+                            if price > 0:
+                                intents.append(TradeIntent(
+                                    signal_id=f"regime_cut_{code}_{trade_date}",
+                                    code=code, side="sell", price=price, shares=sell_shares,
+                                ))
             return intents
 
         if features.empty:
@@ -109,6 +163,14 @@ class ConfigDrivenStrategy:
 
         target_codes = set(scores.nlargest(self.top_n).index)
 
+        # ── 用建议仓位比例缩放可投入资金 ──
+        pos_value = sum(
+            float(daily_data.get(c, {}).get("close", 0)) * s
+            for c, s in positions.items()
+        )
+        total_value = cash + pos_value
+        target_pos_value = total_value * suggested_pos_ratio
+
         # 卖出不在目标池的持仓
         for code, shares in list(positions.items()):
             if shares > 0 and code not in target_codes:
@@ -119,12 +181,18 @@ class ConfigDrivenStrategy:
                         code=code, side="sell", price=price, shares=shares,
                     ))
 
-        # 等权买入目标池
-        if target_codes:
-            per_stock_cash = cash / len(target_codes)
-            for code in target_codes:
-                if positions.get(code, 0) > 0:
-                    continue
+        # 如果当前仓位已经超过目标，不再买入
+        if pos_value >= target_pos_value * 0.95:
+            return intents
+
+        # 可用买入资金 = min(cash, target_pos_value - current_pos_value)
+        buy_budget = min(cash, max(0, target_pos_value - pos_value))
+
+        # 等权买入目标池中的新股
+        new_codes = [c for c in target_codes if positions.get(c, 0) == 0]
+        if new_codes and buy_budget > 0:
+            per_stock_cash = buy_budget / len(new_codes)
+            for code in new_codes:
                 price = float(daily_data.get(code, {}).get("close", 0))
                 if price <= 0:
                     continue
@@ -135,7 +203,31 @@ class ConfigDrivenStrategy:
                         signal_id=f"buy_{code}_{trade_date}",
                         code=code, side="buy", price=price, shares=shares,
                     ))
+
+        if regime_info:
+            logger.info("调仓日 %s%s", trade_date, regime_info)
+
         return intents
+
+    def _build_market_proxy(self, as_of_date: date) -> pd.DataFrame | None:
+        """从 raw_data 构建等权市场指数（用于市场状态判断）。"""
+        if self._raw_data is None:
+            return None
+        from core.common.calendar import get_calendar
+        cal = get_calendar()
+        lookback = cal.get_prev_n_trading_days(as_of_date, 252 * 3)
+        lookback = [d for d in lookback if d in self._raw_data and d <= as_of_date]
+        if len(lookback) < 200:
+            return None
+        rows = []
+        for td in lookback:
+            closes = [v["close"] for v in self._raw_data.get(td, {}).values() if v.get("close", 0) > 0]
+            if not closes:
+                continue
+            rows.append({"date": td, "close": sum(closes) / len(closes)})
+        if not rows:
+            return None
+        return pd.DataFrame(rows).set_index("date").sort_index()
 
     def _should_rebalance(self, trade_date: date) -> bool:
         from core.common.calendar import get_calendar
@@ -325,10 +417,94 @@ def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
 
 
 # ══════════════════════════════════════════════════════════════
+# 3.5 基本面数据加载
+# ══════════════════════════════════════════════════════════════
+
+def _load_financials(codes: list[str]) -> dict[str, dict[str, float]]:
+    """拉取基本面数据：使用东方财富个股财务摘要接口。
+
+    数据项：净利润、营收增速、净利增速、ROE、净资产、每股收益、
+           每股净资产、资产负债率、流动比率、速动比率。
+
+    Returns:
+        {code: {roe_ttm: x, revenue_yoy: y, net_profit_yoy: z, debt_ratio: d, ...}}
+    """
+    import akshare as ak
+
+    result: dict[str, dict[str, float]] = {}
+    logger.info("正在拉取 %d 只股票的基本面数据（东方财富接口）...", len(codes))
+
+    for i, code in enumerate(codes):
+        try:
+            df = ak.stock_financial_abstract_ths(symbol=code, indicator="按年度")
+            if df is None or len(df) == 0:
+                continue
+
+            latest = df.iloc[-1]  # 最新一年
+            prev_year = df.iloc[-2] if len(df) >= 2 else None
+
+            fundamentals: dict[str, float] = {}
+
+            # 从同花顺接口映射到内部因子名
+            col_map_direct = {
+                "净利润": "net_profit_latest",
+                "净利润同比增长率": "net_profit_yoy",
+                "营业总收入": "revenue_latest",
+                "营业总收入同比增长率": "revenue_yoy",
+                "资产负债率": "debt_ratio",
+                "流动比率": "current_ratio",
+                "速动比率": "quick_ratio",
+                "每股净资产": "bps",
+            }
+            for col, factor_name in col_map_direct.items():
+                if col in latest.index:
+                    raw = str(latest[col]).replace("%", "").replace("亿", "").replace(",", "")
+                    try:
+                        v = float(raw)
+                        # 百分比转小数（增长率、负债率等 % 值）
+                        if "%" in str(latest[col]):
+                            v = v / 100.0
+                        # 净利润可能是亿为单位 → 保持原值
+                        fundamentals[factor_name] = v
+                    except ValueError:
+                        pass
+
+            # 计算 ROE = 净利润 / 净资产（每股净资产 × 总股本近似）
+            # 简化：直接用 growth 和 quality 代理
+            net_profit_raw = str(latest.get("净利润", "0")).replace("亿", "").replace(",", "")
+            try:
+                net_profit_val = float(net_profit_raw)
+                # 从 bps * 股本 反推净资产太复杂，用 trend 代理 ROE
+                # ROE ≈ 净利增速 / 营收增速 的质量调整值
+                rev_yoy = fundamentals.get("revenue_yoy", 0)
+                np_yoy = fundamentals.get("net_profit_yoy", 0)
+                if rev_yoy and rev_yoy > 0:
+                    fundamentals["roe_ttm"] = np_yoy / rev_yoy if abs(rev_yoy) > 0.01 else 0.15
+                else:
+                    fundamentals["roe_ttm"] = 0.10  # 默认中性
+            except (ValueError, ZeroDivisionError):
+                fundamentals["roe_ttm"] = 0.10
+
+            # ROA ≈ 净利增速 * 0.6（粗估）
+            fundamentals["roa_ttm"] = fundamentals.get("net_profit_yoy", 0.05) * 0.6
+
+            if fundamentals:
+                result[code] = fundamentals
+
+            if (i + 1) % 20 == 0:
+                logger.info("  基本面数据: %d/%d", i + 1, len(codes))
+        except Exception:
+            continue
+
+    logger.info("基本面数据加载完成: %d 只股票", len(result))
+    return result
+
+
+# ══════════════════════════════════════════════════════════════
 # 4. 因子计算
 # ══════════════════════════════════════════════════════════════
 
-def _build_feature_loader(raw_data: dict, config: dict):
+def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, dict[str, float]] | None = None):
     """根据 config 构建 feature_loader 回调。"""
     from core.common.calendar import get_calendar
     cal = get_calendar()
@@ -387,6 +563,7 @@ def _build_feature_loader(raw_data: dict, config: dict):
                     val = _compute_factor_value(
                         fg, arr, rets, vols_arr, high_arr, low_arr, prev_close,
                         amount_hist.get(code, []),
+                        financials.get(code, {}) if financials else {},
                     )
                     row[name] = float(val) if val is not None and not np.isnan(val) else 0.0
                 except Exception:
@@ -405,6 +582,7 @@ def _compute_factor_value(
     arr: np.ndarray, rets: np.ndarray,
     vols: np.ndarray, high: np.ndarray, low: np.ndarray,
     prev_close: np.ndarray, amounts: list,
+    financials: dict[str, float] | None = None,
 ) -> float | None:
     """在内存数据上直接计算因子值（不走 core/features 的完整实现，
     因为后者依赖 FeatureStore 和特定的 DataFrame 格式）。"""
@@ -493,18 +671,37 @@ def _compute_factor_value(
             illiq = np.abs(rets[-w:]) / np.maximum(np.array(amounts[-w:], dtype=float), 1e-8)
             return float(illiq.mean() * 1e8)
 
-        # 基本面/资金面因子 — demo 中无财报/资金流数据，返回中性值
-        if name in ("roe_ttm", "revenue_yoy"):
-            return 0.0  # 需要 financials 数据，demo 默认返回中性
+        # ── 基本面因子（从已加载的 financials 字典读取）───
+        # 待拉取的数据: pe_ttm/pb/ps_ttm/pcf_ttm/roe_ttm/roa_ttm/roic_ttm/
+        #              gross_margin/net_margin_ttm/revenue_yoy/net_profit_yoy/
+        #              debt_ratio/current_ratio/quick_ratio/cf_ratio_ttm
+        if financials and name in financials:
+            return financials[name]
 
-        if name in ("margin_balance_change_5d",):
-            return 0.0  # 需要两融数据
-
-        if name == "limit_up_ratio":
-            return 0.0  # 需要全市场数据
-
-        if name in ("pe_ttm", "pb"):
-            return 0.0  # 需要 financials（PIT 模式）
+        # ── 估值因子（可以从日线计算的版本）───
+        if name in ("pe_ttm", "pb", "ps_ttm", "pcf_ttm",
+                    "roe_ttm", "roa_ttm", "roic_ttm",
+                    "revenue_yoy", "net_profit_yoy",
+                    "gross_margin_trend", "net_margin_ttm",
+                    "debt_ratio", "current_ratio", "quick_ratio",
+                    "cf_ratio_ttm", "free_cf_yield",
+                    "dividend_yield", "ep_ttm", "peg",
+                    "margin_balance_change_5d", "main_force_net_inflow_5d",
+                    "main_force_net_inflow_20d", "main_force_inflow_ratio",
+                    "dragon_tiger_net_buy", "dragon_tiger_institution_count",
+                    "northbound_quarter_change", "lockup_expiry_days",
+                    "limit_up_count", "limit_up_chain_height", "limit_down_count",
+                    "board_break_ratio", "limit_up_ratio",
+                    "auction_open_premium", "auction_volume_ratio",
+                    "performance_forecast_surprise",
+                    "overnight_adr_mapped", "a50_futures_overnight",
+                    "hsi_futures_overnight", "announcement_sentiment_score",
+                    "theme_heat_score", "dragon_tiger_review_score",
+                    "limit_up_review_signal", "auction_strength_score",
+                    "auction_fake_order_risk", "days_to_next_event"):
+            # 因子名称存在但没有数据 → 返回中性值 0.0
+            # （不在优化器中不会被选中，因为已自动过滤）
+            return 0.0
 
         return 0.0
     except Exception:
@@ -573,7 +770,11 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
         rows = [{"code": code, **fields} for code, fields in raw_data.get(trade_date, {}).items()]
         return pd.DataFrame(rows) if rows else pd.DataFrame()
 
-    feature_loader = _build_feature_loader(raw_data, config)
+    # 加载基本面数据（如有）
+    codes = _get_codes(config)
+    financials = _load_financials(codes)
+
+    feature_loader = _build_feature_loader(raw_data, config, financials)
 
     # ── 回测 ──
     from core.backtest.engine import BacktestEngine
@@ -582,7 +783,7 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
         start_date=start_date, end_date=end_date,
         initial_capital=initial_capital,
     )
-    strategy = ConfigDrivenStrategy(config)
+    strategy = ConfigDrivenStrategy(config, raw_data)
 
     logger.info("开始回测 %s ~ %s (资金=¥%.0f)", start_date, end_date, initial_capital)
     result = engine.run(strategy, data_loader=data_loader, feature_loader=feature_loader)

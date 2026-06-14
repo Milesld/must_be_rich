@@ -1,8 +1,12 @@
 # 量化交易系统 — 开发环境 Docker Compose 编排
 # 启动: docker-compose up -d
 # 查看: docker-compose logs -f
-
-version: "3.8"
+#
+# ⚠ 镜像拉取：
+#   Redpanda 托管在 docker.redpanda.com（境外），需要直连拉取。
+#   如果网络受限，推荐：
+#     A) 连手机热点执行 docker-compose pull（首次拉取后本地有缓存）
+#     B) 只跑研究模式（不需要 Docker）：python research/run_backtest_demo.py
 
 services:
   # ── 基础设施 ──────────────────────
