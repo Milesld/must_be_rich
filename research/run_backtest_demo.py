@@ -349,8 +349,17 @@ def _fetch_eastmoney(codes: list[str], start: date, end: date) -> pd.DataFrame |
 
 def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
     """从配置的数据源拉取数据。"""
-    start = _parse_date(config["backtest"]["start_date"]) - timedelta(days=config["data_source"].get("lookback_days", 400))
-    end = _parse_date(config["backtest"]["end_date"]) + timedelta(days=30)
+    # 计算实际需要的 lookback：取所有启用因子的最大窗口，加 30 天余量
+    min_needed = _calc_min_lookback(config)
+    cfg_lookback = config["data_source"].get("lookback_days", 400)
+    lookback = max(cfg_lookback, min_needed)
+    if lookback > cfg_lookback:
+        logger.warning(
+            "lookback_days %d 不足以覆盖最长因子窗口（需要 %d 天），已自动扩大到 %d",
+            cfg_lookback, min_needed, lookback,
+        )
+    start = _parse_date(config["backtest"]["start_date"]) - timedelta(days=lookback)
+    end = _parse_date(config["backtest"]["end_date"])
     codes = _get_codes(config)
     provider = config.get("data_source", {}).get("provider", "sina")
 
@@ -720,6 +729,25 @@ def _ema(arr: np.ndarray, span: int) -> float:
 # ══════════════════════════════════════════════════════════════
 # 5. 主流程
 # ══════════════════════════════════════════════════════════════
+
+def _calc_min_lookback(config: dict) -> int:
+    """根据所有启用因子中最大的计算窗口，反推最小 lookback。
+
+    每个因子窗口参数不同：momentum_60d 需要 60 个交易日、
+    macd 需要 26+9=35、rsi 需要 14 等，再×1.5 转为自然日、加 30 天缓冲。
+    """
+    max_window = 22  # min_price_points 最低值
+    for fg_name, fg_cfg in config.get("factors", {}).items():
+        if not fg_cfg.get("enabled", False):
+            continue
+        params = fg_cfg.get("params", {})
+        # 取所有数值参数的最大值（window, fast, slow, signal, long 等）
+        for k, v in params.items():
+            if isinstance(v, (int, float)):
+                max_window = max(max_window, int(v))
+    # 交易日 → 自然日（×1.5），+30 天缓冲
+    return int(max_window * 1.5) + 30
+
 
 def _parse_date(s: str) -> date:
     return date.fromisoformat(s)
