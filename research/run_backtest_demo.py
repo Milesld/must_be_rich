@@ -804,7 +804,180 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
         filled = result.trade_records[result.trade_records["status"] == "filled"]
         print(f"\n总成交 {len(result.trade_records)} 笔，其中成交 {len(filled)} 笔")
 
+    # ── 每次调仓的买卖清单 + 盘中持仓变化 ──
+    if not result.trade_records.empty:
+        _print_rebalance_history(result, raw_data)
+
     print(f"\n修改 configs/strategy.yaml 可调整因子、权重、持仓数、股票池等全部参数。")
+
+
+def _load_name_map() -> dict[str, str]:
+    """从 strategy.yaml 加载股票代码→名称映射。"""
+    try:
+        with open("configs/strategy.yaml") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return {}
+    name_map: dict[str, str] = {}
+    for line in lines:
+        import re
+        m = re.match(r'\s*-\s*"(\d{6})"\s*#\s*(.+)', line)
+        if m:
+            name_map[m.group(1)] = m.group(2).strip()
+    return name_map
+
+
+def _print_rebalance_history(result, raw_data: dict) -> None:
+    """打印每次调仓日的买卖清单、费用明细、以及调仓前后的持仓变化。"""
+    trades_df = result.trade_records
+    snapshots = result.daily_snapshots
+    if trades_df.empty:
+        return
+
+    # 加载股票名称映射
+    name_map = _load_name_map()
+
+    # 构建交易日期 → 快照的映射
+    snap_map: dict = {}
+    for s in snapshots:
+        snap_map[str(s.date)] = s
+
+    trades_df["trade_date_str"] = trades_df["trade_date"].astype(str)
+    dates = sorted(trades_df["trade_date_str"].unique())
+
+    for d in dates:
+        day_trades = trades_df[trades_df["trade_date_str"] == d]
+        buys = day_trades[day_trades["side"] == "buy"]
+        sells = day_trades[day_trades["side"] == "sell"]
+
+        if len(buys) == 0 and len(sells) == 0:
+            continue
+
+        # 获取该日快照
+        snap = snap_map.get(d)
+
+        print(f"\n{'─'*80}")
+        print(f"调仓日: {d}  |  {len(buys)} 买入 + {len(sells)} 卖出")
+        if snap is not None:
+            print(f"  总资产: ¥{snap.total_value:,.0f}  |  现金: ¥{snap.cash:,.0f}")
+        print(f"{'─'*80}")
+
+        if len(sells) > 0:
+            print("  【卖出】")
+            total_sell = 0.0
+            total_pnl = 0.0
+            for _, t in sells.iterrows():
+                name = name_map.get(t["code"], "")
+                amount = t["filled_price"] * t["filled_shares"]
+                cost = t.get("cost_breakdown", {})
+                real_fee = _real_cost(cost)
+                slip = _slip(cost)
+                # 已实现盈亏（在 engine._apply_fill 中计算，以减去真实佣金印花过户后的净价与平均成本价的差为准）
+                raw_pnl = t.get("realized_pnl")
+                pnl = 0.0
+                try:
+                    pnl = float(raw_pnl) if raw_pnl is not None and not (isinstance(raw_pnl, float) and pd.isna(raw_pnl)) else 0.0
+                except (ValueError, TypeError):
+                    pnl = 0.0
+                pnl_str = f"  盈亏 {'+' if pnl >= 0 else ''}¥{pnl:,.0f}"
+                print(f"    {t['code']} {name:<10s}  "
+                      f"{int(t['filled_shares']):>7d}股 @ ¥{t['filled_price']:>8.2f}  "
+                      f"成交 ¥{amount:>12,.0f}  "
+                      f"费 ¥{real_fee:.2f} + 滑(估)¥{slip:.2f}  "
+                      f"({_fmt(cost,'commission')}, {_fmt(cost,'stamp_duty')}, {_fmt(cost,'transfer_fee')}){pnl_str}")
+                total_sell += amount
+                total_pnl += pnl
+
+        if len(buys) > 0:
+            print("  【买入】")
+            total_buy = 0.0
+            for _, t in buys.iterrows():
+                name = name_map.get(t["code"], "")
+                amount = t["filled_price"] * t["filled_shares"]
+                cost = t.get("cost_breakdown", {})
+                real_fee = _real_cost(cost)
+                slip = _slip(cost)
+                print(f"    {t['code']} {name:<10s}  "
+                      f"{int(t['filled_shares']):>7d}股 @ ¥{t['filled_price']:>8.2f}  "
+                      f"成交 ¥{amount:>12,.0f}  "
+                      f"费 ¥{real_fee:.2f} + 滑(估)¥{slip:.2f}  "
+                      f"(佣{_fmt(cost,'commission')} 过{_fmt(cost,'transfer_fee')})")
+                total_buy += amount
+
+        # 当日结束后的持仓（含当日新买入的股票，市值为当日收盘价×股数）
+        if snap is not None and snap.positions:
+            print(f"  【当日持仓】({len(snap.positions)} 只，含当日新买入)")
+            for code, shares in sorted(snap.positions.items(), key=lambda x: -x[1]):
+                if shares <= 0:
+                    continue
+                pos_val = snap.position_values.get(code, 0)
+                name = name_map.get(code, "")
+                pct = pos_val / snap.total_value * 100 if snap.total_value > 0 else 0
+                avg_price = pos_val / shares if shares > 0 and pos_val > 0 else 0
+                print(f"    {code} {name:<10s}  {shares:>7d}股  "
+                      f"市值 ¥{pos_val:>10,.0f}  ({pct:.1f}%)  "
+                      f"均价 ¥{avg_price:.2f}")
+            if snap.total_value > 0:
+                cash_pct = snap.cash / snap.total_value * 100
+                print(f"    {'—':<6s} {'现金':<10s}  {'':>7s}  "
+                      f"¥{snap.cash:>12,.0f}  ({cash_pct:.1f}%)")
+            print(f"    总资产: ¥{snap.total_value:,.0f}")
+
+    # 最终持仓摘要
+    _print_final_summary(trades_df, name_map)
+
+
+def _fmt(cost_dict, key: str) -> str:
+    """安全格式化费用字段。"""
+    if not isinstance(cost_dict, dict):
+        return "?"
+    return f"{cost_dict.get(key, 0):.2f}"
+
+
+def _real_cost(cost_dict) -> float:
+    """实际交易费用（佣金+印花税+过户费），不含滑点估算。"""
+    if not isinstance(cost_dict, dict):
+        return 0.0
+    return (cost_dict.get("commission", 0) +
+            cost_dict.get("stamp_duty", 0) +
+            cost_dict.get("transfer_fee", 0))
+
+
+def _slip(cost_dict) -> float:
+    """滑点估算值（非实际费用，仅用于评估策略可行性）。"""
+    if not isinstance(cost_dict, dict):
+        return 0.0
+    return cost_dict.get("slippage_est", 0)
+
+
+def _print_final_summary(trades_df, name_map: dict) -> None:
+    """全时段持仓净变化汇总。"""
+    print(f"\n{'─'*80}")
+    print("全时段持仓净变化汇总")
+    print(f"{'─'*80}")
+    code_summary: dict = {}
+    for _, t in trades_df[trades_df["status"] == "filled"].iterrows():
+        code = t["code"]
+        if code not in code_summary:
+            code_summary[code] = {"buy": 0, "sell": 0, "buy_amount": 0, "sell_amount": 0}
+        if t["side"] == "buy":
+            code_summary[code]["buy"] += int(t["filled_shares"])
+            code_summary[code]["buy_amount"] += t["filled_price"] * t["filled_shares"]
+        else:
+            code_summary[code]["sell"] += int(t["filled_shares"])
+            code_summary[code]["sell_amount"] += t["filled_price"] * t["filled_shares"]
+
+    for code, summary in sorted(code_summary.items(),
+                                 key=lambda x: -(x[1]["buy_amount"] + x[1]["sell_amount"])):
+        name = name_map.get(code, "")
+        net_shares = summary["buy"] - summary["sell"]
+        net_amount = summary["buy_amount"] - summary["sell_amount"]
+        if summary["buy"] > 0 or summary["sell"] > 0:
+            print(f"  {code} {name:<10s}  "
+                  f"买 {summary['buy']:>7,d}股  "
+                  f"卖 {summary['sell']:>7,d}股  "
+                  f"净 {'+' if net_shares >= 0 else ''}{net_shares:,d}股  "
+                  f"净资金 {'+' if net_amount >= 0 else ''}¥{net_amount:,.0f}")
 
 
 if __name__ == "__main__":

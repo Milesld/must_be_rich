@@ -74,6 +74,7 @@ class TradeRecord:
             "filled_price": self.filled_price,
             "filled_shares": self.filled_shares,
             "cost_breakdown": cb.to_dict() if cb else None,
+            "realized_pnl": self.realized_pnl,
             "status": self.status,
             "reject_reason": self.reject_reason,
         }
@@ -269,9 +270,6 @@ class BacktestEngine:
 
             self.constraints.update_daily_info(daily_data, trade_date=td)
 
-            # mtm 持仓
-            positions_mtm = self._mtm_positions(daily_data)
-
             # 加载因子
             features = pd.DataFrame()
             if feature_loader is not None:
@@ -302,6 +300,8 @@ class BacktestEngine:
             # (T+1约束已在 check_t_plus_1 中处理，买入记录在 _apply_fill 后 mark_bought)
 
             # ── 收盘后 ──────────────────────
+            # ★ 重新计算持仓市值（买入后持仓已变化，前面算的是旧值）
+            positions_mtm = self._mtm_positions(daily_data)
             nav = self._calc_nav(daily_data)
             day_return = 0.0
             if self.daily_snapshots:

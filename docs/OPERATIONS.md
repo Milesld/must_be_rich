@@ -301,6 +301,47 @@ cat data/reports/weekly_report_*.md | tail -50
 python -m services.long_term_service.main
 ```
 
+**研究模式查看推荐结果**（不需要 Docker，直接跑回测）：
+
+```bash
+# 跑一次回测并输出完整的持仓/调仓信息
+python research/run_backtest_demo.py
+```
+
+回测输出中包含：
+- `n_buys` = 买入笔数，`n_sells` = 卖出笔数
+- `winning_sells` / `losing_sells` = 盈利/亏损卖出笔数
+- `total_realized_pnl` = 已实现盈亏总额
+
+**怎么知道推荐的股票是什么、权重是多少？**
+
+研究模式下，推荐结果在回测的**每笔调仓记录**中。你可以在脚本末尾加几行查看最近一次调仓：
+
+```python
+# 在 python research/run_backtest_demo.py 的末尾、print("修改 configs...") 之前：
+if not result.trade_records.empty:
+    print("\n最近一次调仓的买卖清单:")
+    last_date = result.trade_records["trade_date"].max()
+    last_trades = result.trade_records[
+        result.trade_records["trade_date"] == last_date
+    ]
+    for _, t in last_trades.iterrows():
+        print(f"  {t['side']:4s} {t['code']}  {t['filled_shares']:>5d}股 @ {t['filled_price']:.2f}")
+```
+
+**如何按比例调整持仓？**
+
+当前策略是**等权（equal_weight）**，即每个月选出的 top-N 股票各分配相等的资金。权重由策略评分自动决定——评分最高的 N 只股票各占 `1/N`。
+
+如果你想按**因子评分强弱**来分配不同权重（比如综合评分最高的占 40%，其次 30%，再次 20%），在 `configs/strategy.yaml` 中改一行：
+
+```yaml
+strategy:
+  optimizer: signal_weighted   # 从 equal_weight 改为 signal_weighted
+```
+
+然后重跑回测看效果。信号加权模式下，评分越高的股票配置越多，单票不超过 20% 上限。
+
 ---
 
 ### 子系统2：盘前推荐（每日 08:00）
@@ -431,6 +472,44 @@ python -m services.premarket_service.main
 # 日内预测 — 手动启动，盘中实时打印信号
 python -m services.intraday_service.main
 ```
+
+---
+
+### Docker 容器管理
+
+```bash
+# 查看当前运行的容器
+docker ps                              # 简要列表
+docker-compose ps                       # docker-compose 项目视角
+
+# 查看日志
+docker-compose logs                     # 所有服务日志
+docker-compose logs monitor             # 只看 monitor
+docker-compose logs -f                  # 实时跟踪（Ctrl+C 退出）
+docker-compose logs --tail=50           # 只看最近 50 行
+
+# 停止
+docker-compose stop                     # 停止容器（不删除）
+docker-compose down                     # 停止并删除容器
+docker-compose down -v                  # 停止 + 删除数据卷（危险，会丢数据库数据）
+
+# 重启
+docker-compose restart                  # 重启所有容器
+docker-compose restart monitor          # 只重启 monitor
+docker-compose up -d                    # 停止后重新启动
+
+# 查看资源占用
+docker stats
+```
+
+**常见场景**：
+
+| 你想做什么 | 命令 |
+|-----------|------|
+| 看一眼后台还在不在跑 | `docker ps` |
+| 看看有没有报错 | `docker-compose logs --tail=50` |
+| 睡前关机 | `docker-compose down` |
+| 明早开机 | `docker-compose up -d` |
 
 ---
 

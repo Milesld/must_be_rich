@@ -1,75 +1,16 @@
-# 量化交易系统 — 开发环境 Docker Compose 编排
-# 启动: docker-compose up -d
-# 查看: docker-compose logs -f
+# 量化交易系统 — 开发环境 Docker Compose
 #
-# ⚠ 镜像拉取：
-#   Redpanda 托管在 docker.redpanda.com（境外），需要直连拉取。
-#   如果网络受限，推荐：
-#     A) 连手机热点执行 docker-compose pull（首次拉取后本地有缓存）
-#     B) 只跑研究模式（不需要 Docker）：python research/run_backtest_demo.py
+# ★ 研究模式（推荐）：不需要 Docker，直接跑 Python 即可
+#   python research/run_backtest_demo.py
+#   python research/factor_optimizer.py --task long_term --rounds 100
+#
+# ★ 实盘模式：需要先拉取镜像，再启动
+#   docker-compose pull   # 首次拉取（需要能访问 Docker Hub）
+#   docker-compose up -d  # 启动全部微服务
 
 services:
+
   # ── 基础设施 ──────────────────────
-
-  redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.2
-    command:
-      - redpanda start
-      - --smp 1
-      - --memory 512M
-      - --reserve-memory 0M
-      - --overprovisioned
-      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
-      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
-    ports:
-      - "19092:19092"
-      - "9644:9644"
-    networks:
-      - backend
-    healthcheck:
-      test: ["CMD", "rpk", "cluster", "info"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.12
-    environment:
-      CLICKHOUSE_DB: quant
-      CLICKHOUSE_USER: quant
-      CLICKHOUSE_PASSWORD: quant
-    ports:
-      - "8123:8123"
-      - "9000:9000"
-    volumes:
-      - ch_data:/var/lib/clickhouse
-      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    networks:
-      - backend
-    healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  mysql:
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: quant
-      MYSQL_USER: quant
-      MYSQL_PASSWORD: quant
-    ports:
-      - "3306:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-    networks:
-      - backend
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -83,24 +24,43 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── 微服务 ────────────────────────
+  # ★ 以下三个数据库在实盘模式下才需要，研究模式不依赖它们。
+  #   如果 Docker Hub 拉取失败，可以先注释掉，只保留 redis 即可。
+  #
+  # clickhouse:
+  #   image: clickhouse/clickhouse-server:24.12
+  #   ...
+  # mysql:
+  #   image: mysql:8.0
+  #   ...
 
-  data_collector:
+  # ★ Redpanda 在实盘模式下做消息总线。Docker Hub 上没有官方镜像。
+  #   需要从 docker.redpanda.com 拉取（国内 DNS 可能解析不到）。
+  #   研究模式下所有微服务通信降级为日志模式，不需要 Redpanda。
+  #   如果你的网络能直连 docker.redpanda.com，取消下面注释：
+  #
+  # redpanda:
+  #   image: docker.redpanda.com/redpandadata/redpanda:v24.2
+  #   ...
+
+  # ── 微服务（需要先构建，非 pull）────
+  # ★ 研究模式不需要构建/运行微服务
+  # ★ 实盘模式：docker-compose up -d 时会自动从 Dockerfile 构建
+
+  monitor:
     build:
       context: .
-      dockerfile: services/data_collector/Dockerfile
+      dockerfile: services/monitor/Dockerfile
     environment:
-      REDPANDA_BROKER: redpanda:9092
-      REDIS_URL: redis://redis:6379
-      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      MONITOR_PORT: "9090"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "9090:9090"
     depends_on:
-      redpanda:
+      redis:
         condition: service_healthy
     networks:
       - backend
-    volumes:
-      - ./data:/app/data
 
   feature_server:
     build:
@@ -118,52 +78,18 @@ services:
     networks:
       - backend
 
-  long_term_service:
+  nlp_service:
     build:
       context: .
-      dockerfile: services/long_term_service/Dockerfile
+      dockerfile: services/nlp_service/Dockerfile
     environment:
-      REDPANDA_BROKER: redpanda:9092
-      REDIS_URL: redis://redis:6379
+      NLP_MODEL: ${NLP_MODEL:-keyword}
+      NLP_DEVICE: ${NLP_DEVICE:-auto}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      NLP_SERVICE_PORT: "50053"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    depends_on:
-      redpanda:
-        condition: service_healthy
-    networks:
-      - backend
-    volumes:
-      - ./data/models:/app/data/models
-      - ./data/reports:/app/data/reports
-
-  premarket_service:
-    build:
-      context: .
-      dockerfile: services/premarket_service/Dockerfile
-    environment:
-      REDPANDA_BROKER: redpanda:9092
-      REDIS_URL: redis://redis:6379
-      NLP_SERVICE_URL: nlp_service:50053
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    depends_on:
-      redpanda:
-        condition: service_healthy
-    networks:
-      - backend
-    volumes:
-      - ./data/premarket_recommendations:/app/data/premarket_recommendations
-
-  intraday_service:
-    build:
-      context: .
-      dockerfile: services/intraday_service/Dockerfile
-    environment:
-      REDPANDA_BROKER: redpanda:9092
-      REDIS_URL: redis://redis:6379
-      RISK_ENGINE_URL: risk_engine:50052
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    depends_on:
-      redpanda:
-        condition: service_healthy
+    ports:
+      - "50053:50053"
     networks:
       - backend
 
@@ -172,70 +98,14 @@ services:
       context: .
       dockerfile: services/risk_engine/Dockerfile
     environment:
-      REDPANDA_BROKER: redpanda:9092
-      REDIS_URL: redis://redis:6379
       RISK_ENGINE_PORT: "50052"
+      REDIS_URL: redis://redis:6379
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "50052:50052"
-    depends_on:
-      redpanda:
-        condition: service_healthy
-    networks:
-      - backend
-
-  order_manager:
-    build:
-      context: .
-      dockerfile: services/order_manager/Dockerfile
-    environment:
-      REDPANDA_BROKER: redpanda:9092
-      RISK_ENGINE_URL: risk_engine:50052
-      QMT_ENABLED: ${QMT_ENABLED:-false}
-      QMT_ACCOUNT_ID: ${QMT_ACCOUNT_ID:-}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    depends_on:
-      risk_engine:
-        condition: service_started
-    networks:
-      - backend
-
-  nlp_service:
-    build:
-      context: .
-      dockerfile: services/nlp_service/Dockerfile
-    environment:
-      NLP_MODEL: ${NLP_MODEL:-keyword}
-      NLP_DEVICE: ${NLP_DEVICE:-auto}
-      NLP_SERVICE_PORT: "50053"
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    ports:
-      - "50053:50053"
-    networks:
-      - backend
-
-  monitor:
-    build:
-      context: .
-      dockerfile: services/monitor/Dockerfile
-    environment:
-      REDPANDA_BROKER: redpanda:9092
-      DINGTALK_WEBHOOK: ${DINGTALK_WEBHOOK:-}
-      WEWORK_WEBHOOK: ${WEWORK_WEBHOOK:-}
-      MONITOR_PORT: "9090"
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    ports:
-      - "9090:9090"
-    depends_on:
-      redpanda:
-        condition: service_healthy
     networks:
       - backend
 
 networks:
   backend:
     driver: bridge
-
-volumes:
-  ch_data:
-  mysql_data:
