@@ -3,8 +3,8 @@
 # ══════════════════════════════════════════════════════════
 
 backtest:
-  start_date: "2024-01-02"
-  end_date: "2025-12-30"
+  start_date: "2025-07-01"
+  end_date: "2026-06-20"
   initial_capital: 200000
 
 data_source:
@@ -167,86 +167,95 @@ regime:
   max_position_ratio: 0.90
   emergency_threshold: 0.40
 
+# ══════════════════════════════════════════════════════════
+# Optimizer #1 (TPE全区间搜索, 夏普1.88, 2025-06~2026-06)
+# 8因子组合：MACD趋势 + 量比确认 + 流动性约束
+# ══════════════════════════════════════════════════════════
 factors:
-  momentum_20d:
+  macd_dif:
     enabled: true
-    weight: 0.01
+    weight: 0.400
     module: core.features.technical
-    function: momentum
-    params: {window: 20}
-    description: "20日累计收益率"
-
-  volatility_20d:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: volatility
-    params: {window: 20}
-    description: "20日年化波动率（反转：低波动→高分）"
-
-  momentum_60d:
-    enabled: true
-    weight: 0.35
-    module: core.features.technical
-    function: momentum
-    params: {window: 60}
-    description: "60日累计收益率（中期动量）"
-
-  alpha_momentum_20d:
-    enabled: true
-    weight: 0.15
-    module: core.features.technical
-    function: alpha_momentum
-    params: {window: 20}
-    description: "剔除市场beta后的纯alpha动量"
-
-  amplitude_20d:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: amplitude
-    params: {window: 20}
-    description: "20日平均振幅"
-
-  atr_14:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: atr
-    params: {window: 14}
-    description: "14日平均真实波幅"
-
-  turnover_5d:
-    enabled: true
-    weight: 0.13
-    module: core.features.technical
-    function: turnover
-    params: {window: 5}
-    description: "5日平均换手率"
-
-  turnover_20d:
-    enabled: true
-    weight: 0.04
-    module: core.features.technical
-    function: turnover
-    params: {window: 20}
-    description: "20日平均换手率"
+    function: macd_dif
+    params: {fast: 12, signal: 9, slow: 26}
+    description: "MACD快慢线差值 — 趋势加速/减速的核心信号"
 
   volume_ratio:
     enabled: true
-    weight: 0.10
+    weight: 0.258
     module: core.features.technical
     function: volume_ratio
     params: {window: 20}
-    description: "当日成交量/20日均量"
+    description: "量比=当日成交量/20日均量 — 放量突破确认资金共识"
 
   amihud_illiq:
     enabled: true
-    weight: 0.02
+    weight: 0.106
     module: core.features.technical
     function: amihud_illiq
     params: {window: 20}
-    description: "Amihud非流动性指标（值越大流动性越差→反转项）"
+    description: "Amihud非流动性 — 约束项，确保选股有流动性（反转：越低→越高分）"
+
+  amplitude_20d:
+    enabled: true
+    weight: 0.100
+    module: core.features.technical
+    function: amplitude
+    params: {window: 20}
+    description: "20日平均振幅 — 排除异常波动"
+
+  turnover_20d:
+    enabled: true
+    weight: 0.079
+    module: core.features.technical
+    function: turnover
+    params: {window: 20}
+    description: "20日平均换手率 — 适度的市场参与度"
+
+  atr_14:
+    enabled: true
+    weight: 0.024
+    module: core.features.technical
+    function: atr
+    params: {window: 14}
+    description: "14日ATR — 小权重多元化"
+
+  alpha_momentum_20d:
+    enabled: true
+    weight: 0.017
+    module: core.features.technical
+    function: alpha_momentum
+    params: {window: 20}
+    description: "剔除市场beta后的纯alpha动量 — 补足"
+
+  volatility_20d:
+    enabled: true
+    weight: 0.017
+    module: core.features.technical
+    function: volatility
+    params: {window: 20}
+    description: "20日年化波动率 — 补足，反转项（低波动→高分）"
+
+  momentum_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: momentum
+    params: {window: 20}
+
+  momentum_60d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: momentum
+    params: {window: 60}
+
+  turnover_5d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: turnover
+    params: {window: 5}
 
   rsi_14:
     enabled: false
@@ -254,15 +263,6 @@ factors:
     module: core.features.technical
     function: rsi
     params: {window: 14}
-    description: "14日RSI（30以下超卖→高分, 70以上超买→低分）"
-
-  macd_dif:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: macd_dif
-    params: {fast: 12, signal: 9, slow: 26}
-    description: "MACD快慢线差值（DIF）"
 
   macd_dea:
     enabled: false
@@ -270,7 +270,6 @@ factors:
     module: core.features.technical
     function: macd_dea
     params: {fast: 12, signal: 9, slow: 26}
-    description: "MACD信号线（DEA）"
 
   macd_hist:
     enabled: false
@@ -278,7 +277,6 @@ factors:
     module: core.features.technical
     function: macd_hist
     params: {fast: 12, signal: 9, slow: 26}
-    description: "MACD柱状图（DIF-DEA）×2"
 
   bollinger_position:
     enabled: false
@@ -286,23 +284,20 @@ factors:
     module: core.features.technical
     function: bollinger_position
     params: {num_std: 2, window: 20}
-    description: "布林带位置（0=下轨, 0.5=中轨, 1=上轨）"
 
   ma_alignment:
-    enabled: true
-    weight: 0.10
+    enabled: false
+    weight: 0.0
     module: core.features.technical
     function: ma_alignment
     params: {long: 60, mid: 20, short: 5}
-    description: "均线多空排列评分（+1多头, 0交叉, -1空头）"
 
   sector_relative_strength_20d:
-    enabled: true
-    weight: 0.08
+    enabled: false
+    weight: 0.0
     module: core.features.technical
     function: sector_relative_strength
     params: {window: 20}
-    description: "板块内相对强度（个股动量在板块内的百分位排名）"
 
   pe_ttm:
     enabled: false
@@ -571,8 +566,8 @@ factors:
     params: {}
 
   announcement_sentiment_score:
-    enabled: true
-    weight: 0.02
+    enabled: false
+    weight: 0.0
     module: core.features.fundamental
     function: announcement_sentiment_score
     params: {}

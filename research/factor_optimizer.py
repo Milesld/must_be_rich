@@ -49,6 +49,13 @@ NEEDS_FINANCIAL_DATA = {
     "roic_ttm", "gross_margin_trend", "net_margin_ttm",
     "cf_ratio_ttm", "free_cf_yield",
 }
+# 以下因子来自同花顺 ths 接口，数据精度不足（CONTEXT.md #92 记录），
+# 在准确财报数据接入前必须排除，否则 optimizer 会被假信号误导。
+NEEDS_THS_FUNDAMENTAL = {
+    "roe_ttm", "roa_ttm",
+    "revenue_yoy", "net_profit_yoy",
+    "debt_ratio", "current_ratio", "quick_ratio",
+}
 NEEDS_MARGIN_DATA = {
     "main_force_net_inflow_5d", "main_force_net_inflow_20d",
     "main_force_inflow_ratio", "margin_balance_change_5d",
@@ -68,10 +75,15 @@ NEEDS_MARKET_WIDE = {
 }
 NEEDS_QUARTERLY = {"northbound_quarter_change"}
 
+# 注意：NEEDS_OVERSEAS 和 NEEDS_MARKET_WIDE 已实现数据源，
+# 不再排除。NEEDS_NLP 中只保留 theme_heat_score，
+# announcement_sentiment_score 也已实现（从财务数据构造代理文本）。
+NLP_NO_DATA = {"theme_heat_score"}
+
 ALL_NO_DATA = (
-    NEEDS_FINANCIAL_DATA | NEEDS_MARGIN_DATA | NEEDS_DRAGON_TIGER
-    | NEEDS_OVERSEAS | NEEDS_L2_AUCTION | NEEDS_NLP
-    | NEEDS_MARKET_WIDE | NEEDS_QUARTERLY
+    NEEDS_FINANCIAL_DATA | NEEDS_THS_FUNDAMENTAL | NEEDS_MARGIN_DATA
+    | NEEDS_DRAGON_TIGER | NEEDS_L2_AUCTION | NLP_NO_DATA
+    | NEEDS_QUARTERLY
 )
 
 # ══════════════════════════════════════════════════════════════
@@ -82,19 +94,25 @@ FACTOR_POOL = {
     "long_term": {
         "label": "长期选股（月度调仓）",
         "candidates": [
+            # 纯技术面（14个）— 全部从OHLCV计算，数据可靠
             "momentum_20d", "momentum_60d", "alpha_momentum_20d",
             "volatility_20d", "amplitude_20d", "atr_14",
             "turnover_5d", "turnover_20d", "volume_ratio", "amihud_illiq",
             "rsi_14", "macd_dif", "bollinger_position", "ma_alignment",
-            "roe_ttm", "roa_ttm",
-            "revenue_yoy", "net_profit_yoy",
-            "debt_ratio", "current_ratio", "quick_ratio",
+            # 板块内横截面（1个）— 从OHLCV推算，数据可靠
+            "sector_relative_strength_20d",
+            # 注意：announcement_sentiment_score 依赖 ths 财务数据构造代理文本，
+            # 数据精度不足，不纳入月频候选池（它更适合盘前日频场景）
         ],
     },
     "premarket": {
         "label": "盘前推荐（日频）",
         "candidates": [
             "momentum_20d", "volatility_20d", "volume_ratio", "turnover_5d",
+            "overnight_adr_mapped", "a50_futures_overnight", "hsi_futures_overnight",
+            "limit_up_count", "limit_up_chain_height", "limit_down_count",
+            "board_break_ratio", "limit_up_ratio",
+            "announcement_sentiment_score",
         ],
     },
     "intraday": {
@@ -123,8 +141,10 @@ def _parse_date(s: str) -> date:
 _backtest_cache: dict[str, dict] = {}
 
 
-def _cache_key(enabled: list[str], weights: tuple, config_sig: str) -> str:
-    return config_sig + "|" + "|".join(sorted(enabled))
+def _cache_key(enabled: list[str], weights: dict[str, float], config_sig: str) -> str:
+    # 缓存键包含因子名和权重（四舍五入到3位小数，避免浮点噪音）
+    weight_str = "|".join(f"{n}={weights.get(n,0):.3f}" for n in sorted(enabled))
+    return config_sig + "|" + weight_str
 
 
 def run_single_backtest(config: dict, label: str = "") -> dict | None:
@@ -132,13 +152,15 @@ def run_single_backtest(config: dict, label: str = "") -> dict | None:
     from research.run_backtest_demo import (
         ConfigDrivenStrategy, _build_feature_loader,
         _load_real_data, _load_financials, _get_codes,
+        _load_overseas_data, _build_market_wide_from_pool,
     )
     from core.backtest.engine import BacktestEngine
 
     enabled = sorted([n for n, c in config["factors"].items() if c.get("enabled")])
+    weights = {n: config["factors"][n].get("weight", 0) for n in enabled}
     bt = config["backtest"]
     sig = f"{bt['start_date']}|{bt['end_date']}|{bt['initial_capital']}"
-    ck = _cache_key(enabled, tuple(), sig)
+    ck = _cache_key(enabled, weights, sig)
     if ck in _backtest_cache:
         return _backtest_cache[ck]
 
@@ -157,8 +179,11 @@ def run_single_backtest(config: dict, label: str = "") -> dict | None:
 
     codes = _get_codes(config)
     financials = _load_financials(codes) if codes else {}
-    feature_loader = _build_feature_loader(raw_data, config, financials)
-    strategy = ConfigDrivenStrategy(config, raw_data)
+    overseas_data = _load_overseas_data(start_date, end_date)
+    market_wide_data = _build_market_wide_from_pool(raw_data)
+    feature_loader = _build_feature_loader(raw_data, config, financials,
+                                           overseas_data, market_wide_data)
+    strategy = ConfigDrivenStrategy(config, raw_data, overseas_data)
     engine = BacktestEngine(
         start_date=start_date, end_date=end_date,
         initial_capital=bt["initial_capital"],
@@ -208,11 +233,42 @@ def optimize_optuna(
             for name in selected
         ])
         weights = raw_weights / raw_weights.sum()
+        weights_float = [float(w) for w in weights]
+
+        # 单因子权重上限：防止 optimizer 把宝全押在一个因子上
+        # amihud_illiq 上限 0.20 — 流动性因子只是约束项，不是 Alpha 来源
+        # 其他因子上限 0.40 — 给 MACD/量价类因子空间但不极端
+        FACTOR_MAX_WEIGHT = {
+            "amihud_illiq": 0.20,
+        }
+        DEFAULT_MAX_WEIGHT = 0.40
+        MAX_REDISTRIBUTE = 5  # 最多重分配 5 次以防死循环
+        for _ in range(MAX_REDISTRIBUTE):
+            over: list[int] = []
+            excess_total = 0.0
+            for i, name in enumerate(selected):
+                cap = FACTOR_MAX_WEIGHT.get(name, DEFAULT_MAX_WEIGHT)
+                if weights_float[i] > cap:
+                    excess = weights_float[i] - cap
+                    weights_float[i] = cap
+                    excess_total += excess
+                    over.append(i)
+            if excess_total < 0.001:
+                break
+            # 将超出部分按比例分给未触及上限的因子
+            eligible = [i for i in range(len(selected)) if i not in over]
+            if not eligible:
+                break
+            eligible_total = sum(weights_float[i] for i in eligible)
+            if eligible_total < 0.001:
+                break
+            for i in eligible:
+                weights_float[i] += excess_total * (weights_float[i] / eligible_total)
 
         cfg = copy.deepcopy(base_config)
         for name in all_factors:
             cfg["factors"][name]["enabled"] = False
-        for name, w in zip(selected, weights):
+        for name, w in zip(selected, weights_float):
             cfg["factors"][name]["enabled"] = True
             cfg["factors"][name]["weight"] = float(w)
 
@@ -224,19 +280,33 @@ def optimize_optuna(
         trial.set_user_attr("max_drawdown", float(metrics.get("max_drawdown", -1)))
         trial.set_user_attr("win_rate", str(metrics.get("win_rate", "N/A")))
         trial.set_user_attr("total_trades", int(metrics.get("total_trades", 0)))
+        trial.set_user_attr("n_trading_days", int(metrics.get("n_trading_days", 0)))
         trial.set_user_attr("factors", "|".join(selected))
         trial.set_user_attr(
             "weights",
-            "|".join(f"{n}={w:.3f}" for n, w in zip(selected, weights)),
+            "|".join(f"{n}={w:.3f}" for n, w in zip(selected, weights_float)),
         )
 
         sharpe = float(metrics.get("sharpe_ratio", -99))
         mdd = abs(float(metrics.get("max_drawdown", 0)))
+        total_trades = int(metrics.get("total_trades", 0))
+        n_trading_days = int(metrics.get("n_trading_days", 0))
         penalty = 0.0
-        if mdd > 0.30:
-            penalty += (mdd - 0.30) * 5.0
+        if mdd > 0.25:
+            penalty += (mdd - 0.25) * 5.0
+        if sharpe > 2.0:
+            penalty += (sharpe - 2.0) * 3.0  # 加严：>2.0开始罚分
         if sharpe > 3.0:
-            penalty += (sharpe - 3.0) * 2.0
+            penalty += (sharpe - 3.0) * 5.0  # >3.0叠加重罚
+        # 低交易量惩罚：交易太少 ≈ buy-and-hold 运气的概率高
+        if n_trading_days > 0:
+            avg_trades_per_month = total_trades / (n_trading_days / 21)
+            if avg_trades_per_month < 3.0:
+                penalty += (3.0 - avg_trades_per_month) * 0.5
+        # amihud_illiq 过重惩罚：非流动性因子是约束项，不是 Alpha 源
+        amihud_w = weights_float[selected.index("amihud_illiq")] if "amihud_illiq" in selected else 0.0
+        if amihud_w > 0.15:
+            penalty += (amihud_w - 0.15) * 10.0
         return sharpe - penalty
 
     print(f"\n[Optuna TPE] {n_trials} 轮, 因子 {min_factors}~{max_factors} 个")
@@ -288,6 +358,7 @@ def optimize_optuna(
             "max_drawdown": float(t.user_attrs.get("max_drawdown", 0)),
             "win_rate": t.user_attrs.get("win_rate", "N/A"),
             "total_trades": int(t.user_attrs.get("total_trades", 0)),
+            "n_trading_days": int(t.user_attrs.get("n_trading_days", 0)),
         })
 
     return results

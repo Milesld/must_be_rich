@@ -70,7 +70,8 @@ class ConfigDrivenStrategy:
         "amihud_illiq", "amplitude_20d",
     }
 
-    def __init__(self, config: dict, raw_data: dict | None = None) -> None:
+    def __init__(self, config: dict, raw_data: dict | None = None,
+                 overseas_data: dict | None = None) -> None:
         cfg = config.get("strategy", {})
         self.top_n = cfg.get("top_n", 5)
         self.rebalance_freq = cfg.get("rebalance_frequency", "monthly")
@@ -93,7 +94,9 @@ class ConfigDrivenStrategy:
             self._regime_detector = MarketRegimeDetector(config=regime_cfg.get("params", {}))
             self._regime_min_position = regime_cfg.get("min_position_ratio", 0.30)
             self._regime_max_position = regime_cfg.get("max_position_ratio", 0.90)
+            self._regime_emergency_threshold = regime_cfg.get("emergency_threshold", 0.50)
             self._raw_data = raw_data
+            self._overseas_data = overseas_data or {}
             logger.info("市场状态判断已启用 (仓位范围: %.0f%%~%.0f%%)",
                         self._regime_min_position * 100, self._regime_max_position * 100)
         else:
@@ -101,6 +104,7 @@ class ConfigDrivenStrategy:
             self._regime_min_position = 1.0
             self._regime_max_position = 1.0
             self._raw_data = None
+            self._overseas_data = {}
 
         # 跟踪当前实际仓位（用于判断是否需要减仓）
         self._current_regime: Any = None
@@ -122,7 +126,8 @@ class ConfigDrivenStrategy:
         if self._regime_detector is not None:
             market_df = self._build_market_proxy(trade_date)
             if market_df is not None and len(market_df) > 200:
-                self._current_regime = self._regime_detector.detect(trade_date, market_df)
+                self._current_regime = self._regime_detector.detect(
+                    trade_date, market_df, overseas_data=self._overseas_data)
                 raw_ratio = self._current_regime.suggested_position_ratio
                 suggested_pos_ratio = max(self._regime_min_position,
                                           min(self._regime_max_position, raw_ratio))
@@ -130,7 +135,7 @@ class ConfigDrivenStrategy:
 
         if not self._should_rebalance(trade_date):
             # 非调仓日也检查：如果市场急转直下，可能需要紧急减仓
-            if self._regime_detector is not None and suggested_pos_ratio < 0.50:
+            if self._regime_detector is not None and suggested_pos_ratio < self._regime_emergency_threshold:
                 # 极度悲观 → 卖出部分持仓
                 pos_value = sum(
                     float(daily_data.get(c, {}).get("close", 0)) * s
@@ -510,10 +515,153 @@ def _load_financials(codes: list[str]) -> dict[str, dict[str, float]]:
 
 
 # ══════════════════════════════════════════════════════════════
+# 3.6 海外市场数据加载
+# ══════════════════════════════════════════════════════════════
+
+def _load_overseas_data(start: date, end: date) -> dict[date, dict[str, float]]:
+    """加载海外市场指数日线数据（新浪接口）。
+
+    加载 SPX、NASDAQ 和 HSI 指数，计算每日涨跌幅。
+    A50 期货数据通过 US+HK 合成代理。
+
+    Returns:
+        {date: {spx_ret, ndx_ret, hsi_ret, a50_proxy_ret}}
+    """
+    import akshare as ak
+
+    out: dict[date, dict[str, float]] = {}
+    pad_start = start - timedelta(days=10)  # 多拉几天覆盖周末
+
+    # ── 美股指数（新浪）──
+    for symbol, key in [(".INX", "spx_ret"), (".IXIC", "ndx_ret")]:
+        try:
+            raw = ak.index_us_stock_sina(symbol=symbol)
+            if raw is not None and len(raw) > 0:
+                df = raw.copy()
+                df["trade_date"] = pd.to_datetime(df["date"]).dt.date
+                df = df[(df["trade_date"] >= pad_start) & (df["trade_date"] <= end)]
+                df = df.sort_values("trade_date")
+                df["ret"] = df["close"].astype(float).pct_change()
+                for _, row in df.iterrows():
+                    td = row["trade_date"]
+                    if td >= start and not np.isnan(row["ret"]):
+                        out.setdefault(td, {})[key] = float(row["ret"])
+        except Exception:
+            logger.debug("海外数据 %s 加载失败，跳过", key)
+
+    # ── 港股恒生指数（新浪）──
+    try:
+        raw = ak.stock_hk_index_daily_sina(symbol="HSI")
+        if raw is not None and len(raw) > 0:
+            df = raw.copy()
+            df["trade_date"] = pd.to_datetime(df["date"]).dt.date
+            df = df[(df["trade_date"] >= pad_start) & (df["trade_date"] <= end)]
+            df = df.sort_values("trade_date")
+            df["ret"] = df["close"].astype(float).pct_change()
+            for _, row in df.iterrows():
+                td = row["trade_date"]
+                if td >= start and not np.isnan(row["ret"]):
+                    out.setdefault(td, {})["hsi_ret"] = float(row["ret"])
+    except Exception:
+        logger.debug("港股指数数据加载失败，跳过")
+
+    # ── A50 期货代理（US+HK 合成）──
+    for td in out:
+        spx = out[td].get("spx_ret", 0)
+        ndx = out[td].get("ndx_ret", 0)
+        hsi = out[td].get("hsi_ret", 0)
+        # A50 ≈ 0.4*美股科技 + 0.3*港股 + 0.3*残差
+        out[td]["a50_proxy_ret"] = 0.4 * ndx + 0.3 * hsi + 0.15 * spx
+
+    logger.info("海外市场数据加载完成: %d 个交易日", len(out))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════
+# 3.7 全市场情绪数据（从池内OHLCV推算）
+# ══════════════════════════════════════════════════════════════
+
+def _build_market_wide_from_pool(raw_data: dict[date, dict]) -> dict[date, dict[str, float]]:
+    """从已有股票池OHLCV数据推算全市场情绪代理指标。
+
+    因为回测中无法逐日拉取5000只全市场数据，用池内48只股票的
+    涨跌停/连板统计作为市场情绪的近似代理。
+
+    Returns:
+        {date: {limit_up_count, limit_down_count, limit_up_ratio, board_break_ratio, chain_height}}
+    """
+    out: dict[date, dict[str, float]] = {}
+    # 跟踪连续涨停（用于计算连板高度）
+    chain_tracker: dict[str, int] = {}  # {code: consecutive_lu_days}
+
+    for td in sorted(raw_data.keys()):
+        day_data = raw_data[td]
+        advance = 0
+        decline = 0
+        limit_up_codes: set[str] = set()
+        limit_down_count = 0
+        board_break_count = 0
+
+        for code, row in day_data.items():
+            close = float(row.get("close", 0))
+            pre_close = float(row.get("pre_close", 0))
+            high = float(row.get("high", 0))
+            low = float(row.get("low", 0))
+            if close <= 0 or pre_close <= 0:
+                continue
+
+            chg_pct = (close - pre_close) / pre_close
+
+            if chg_pct > 0:
+                advance += 1
+            elif chg_pct < 0:
+                decline += 1
+
+            # 涨停判断（A股 ±10%，科创 ±20%）
+            is_kcb = code.startswith("688")
+            lu_limit = 0.198 if is_kcb else 0.098
+            ld_limit = -0.198 if is_kcb else -0.098
+
+            if chg_pct >= lu_limit - 0.002:  # 允许微小舍入
+                limit_up_codes.add(code)
+            elif chg_pct <= ld_limit + 0.002:
+                limit_down_count += 1
+
+            # 炸板：盘中曾近涨停但收盘回落超过2%
+            if high / pre_close - 1 >= lu_limit - 0.005 and chg_pct < lu_limit - 0.02:
+                board_break_count += 1
+
+        # 连板高度追踪
+        for code in list(chain_tracker.keys()):
+            if code not in limit_up_codes:
+                del chain_tracker[code]
+        for code in limit_up_codes:
+            chain_tracker[code] = chain_tracker.get(code, 0) + 1
+        chain_height = max(chain_tracker.values()) if chain_tracker else 0
+
+        total = advance + decline
+        limit_up_count = len(limit_up_codes)
+        limit_up_ratio_val = limit_up_count / total if total > 0 else 0.0
+        bb_ratio = board_break_count / max(limit_up_count + board_break_count, 1)
+
+        out[td] = {
+            "limit_up_count": float(limit_up_count),
+            "limit_down_count": float(limit_down_count),
+            "limit_up_ratio": float(limit_up_ratio_val),
+            "board_break_ratio": float(bb_ratio),
+            "limit_up_chain_height": float(chain_height),
+        }
+
+    return out
+
+
+# ══════════════════════════════════════════════════════════════
 # 4. 因子计算
 # ══════════════════════════════════════════════════════════════
 
-def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, dict[str, float]] | None = None):
+def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, dict[str, float]] | None = None,
+                          overseas_data: dict[date, dict[str, float]] | None = None,
+                          market_wide_data: dict[date, dict[str, float]] | None = None):
     """根据 config 构建 feature_loader 回调。"""
     from core.common.calendar import get_calendar
     cal = get_calendar()
@@ -526,6 +674,11 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
     def loader(trade_date: date, codes: list[str]) -> pd.DataFrame:
         lookback_dates = cal.get_prev_n_trading_days(trade_date, lookback)
         lookback_dates = [d for d in lookback_dates if d in raw_data]
+
+        # 当日海外数据
+        today_overseas = overseas_data.get(trade_date, {}) if overseas_data else {}
+        # 当日全市场数据
+        today_market = market_wide_data.get(trade_date, {}) if market_wide_data else {}
 
         # 构建价格序列
         price_hist: dict[str, list[float]] = {}
@@ -573,6 +726,8 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
                         fg, arr, rets, vols_arr, high_arr, low_arr, prev_close,
                         amount_hist.get(code, []),
                         financials.get(code, {}) if financials else {},
+                        today_overseas,
+                        today_market,
                     )
                     row[name] = float(val) if val is not None and not np.isnan(val) else 0.0
                 except Exception:
@@ -581,9 +736,61 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
             results.append(row)
 
         df = pd.DataFrame(results)
+        if not df.empty:
+            df = _add_cross_sectional_factors(df, factors, price_hist)
         return df.set_index("code") if not df.empty else df
 
     return loader
+
+
+def _add_cross_sectional_factors(
+    df: pd.DataFrame,
+    factors: list[dict],
+    price_hist: dict[str, list[float]],
+) -> pd.DataFrame:
+    """计算需要横截面对比的因子（alpha动量、板块相对强度）。"""
+    factor_names = {f["name"] for f in factors}
+
+    # alpha_momentum: 个股动量 - 等权市场平均动量
+    if "alpha_momentum_20d" in factor_names:
+        w = 20
+        # 直接从价格序列重算动量，避免依赖其他因子列
+        mom_values: dict[str, float] = {}
+        for code in df["code"]:
+            prices = price_hist.get(code, [])
+            if len(prices) >= w + 1:
+                mom_values[code] = prices[-1] / prices[-min(w, len(prices))] - 1.0
+            else:
+                mom_values[code] = 0.0
+        if mom_values:
+            mean_mom = sum(mom_values.values()) / len(mom_values)
+            df["alpha_momentum_20d"] = df["code"].map(
+                lambda c: mom_values.get(c, 0.0) - mean_mom
+            )
+        else:
+            df["alpha_momentum_20d"] = 0.0
+
+    # sector_relative_strength: 个股动量在板块内的百分位排名
+    if "sector_relative_strength_20d" in factor_names:
+        w = 20
+        mom_values = {}
+        for code in df["code"]:
+            prices = price_hist.get(code, [])
+            if len(prices) >= w + 1:
+                mom_values[code] = prices[-1] / prices[-min(w, len(prices))] - 1.0
+            else:
+                mom_values[code] = 0.0
+        df["_raw_mom"] = df["code"].map(mom_values)
+        df["_sector"] = df["code"].map(_get_sector)
+        # 板块内百分位排名（至少3只才计算，否则给0.5中性）
+        def _safe_rank(grp):
+            if len(grp) >= 3:
+                return grp.rank(pct=True)
+            return pd.Series(0.5, index=grp.index)
+        df["sector_relative_strength_20d"] = df.groupby("_sector")["_raw_mom"].transform(_safe_rank)
+        df.drop(columns=["_raw_mom", "_sector"], inplace=True)
+
+    return df
 
 
 def _compute_factor_value(
@@ -592,6 +799,8 @@ def _compute_factor_value(
     vols: np.ndarray, high: np.ndarray, low: np.ndarray,
     prev_close: np.ndarray, amounts: list,
     financials: dict[str, float] | None = None,
+    overseas: dict[str, float] | None = None,
+    market_wide: dict[str, float] | None = None,
 ) -> float | None:
     """在内存数据上直接计算因子值（不走 core/features 的完整实现，
     因为后者依赖 FeatureStore 和特定的 DataFrame 格式）。"""
@@ -680,6 +889,61 @@ def _compute_factor_value(
             illiq = np.abs(rets[-w:]) / np.maximum(np.array(amounts[-w:], dtype=float), 1e-8)
             return float(illiq.mean() * 1e8)
 
+        # ── NLP 情绪因子 ───
+        if name == "announcement_sentiment_score":
+            # 使用财务数据构造代理文本，经关键词引擎评分
+            if financials:
+                text_parts = []
+                np_yoy = financials.get("net_profit_yoy", 0) or 0
+                rev_yoy = financials.get("revenue_yoy", 0) or 0
+                debt = financials.get("debt_ratio", 0) or 0
+                if np_yoy > 0.05:
+                    text_parts.append("净利润大幅增长")
+                elif np_yoy > 0:
+                    text_parts.append("净利润增长")
+                elif np_yoy < -0.10:
+                    text_parts.append("净利润下降")
+                if rev_yoy > 0.05:
+                    text_parts.append("营收增长")
+                elif rev_yoy < -0.10:
+                    text_parts.append("营收下降")
+                if debt > 0.60:
+                    text_parts.append("负债率高")
+                elif debt < 0.30:
+                    text_parts.append("负债率低")
+                if text_parts:
+                    from core.models.nlp import KeywordSentimentEngine
+                    engine = KeywordSentimentEngine()
+                    result = engine.analyze(" ".join(text_parts))
+                    if result.sentiment == "positive":
+                        return result.confidence
+                    elif result.sentiment == "negative":
+                        return -result.confidence
+            return 0.0
+
+        # ── 海外市场因子 ───
+        overseas = overseas or {}
+        if name == "overnight_adr_mapped":
+            # 中概股隔夜映射 ≈ NASDAQ × 1.2（中概beta更高）
+            return overseas.get("ndx_ret", 0) * 1.2
+        if name == "a50_futures_overnight":
+            return overseas.get("a50_proxy_ret", 0)
+        if name == "hsi_futures_overnight":
+            return overseas.get("hsi_ret", 0)
+
+        # ── 全市场情绪因子 ───
+        market_wide = market_wide or {}
+        if name == "limit_up_count":
+            return market_wide.get("limit_up_count", 0)
+        if name == "limit_up_chain_height":
+            return market_wide.get("limit_up_chain_height", 0)
+        if name == "limit_down_count":
+            return -market_wide.get("limit_down_count", 0)  # 反转：跌停越多→分越低
+        if name == "board_break_ratio":
+            return -market_wide.get("board_break_ratio", 0)  # 反转：炸板率越高→分越低
+        if name == "limit_up_ratio":
+            return market_wide.get("limit_up_ratio", 0)
+
         # ── 基本面因子（从已加载的 financials 字典读取）───
         # 待拉取的数据: pe_ttm/pb/ps_ttm/pcf_ttm/roe_ttm/roa_ttm/roic_ttm/
         #              gross_margin/net_margin_ttm/revenue_yoy/net_profit_yoy/
@@ -699,12 +963,8 @@ def _compute_factor_value(
                     "main_force_net_inflow_20d", "main_force_inflow_ratio",
                     "dragon_tiger_net_buy", "dragon_tiger_institution_count",
                     "northbound_quarter_change", "lockup_expiry_days",
-                    "limit_up_count", "limit_up_chain_height", "limit_down_count",
-                    "board_break_ratio", "limit_up_ratio",
                     "auction_open_premium", "auction_volume_ratio",
                     "performance_forecast_surprise",
-                    "overnight_adr_mapped", "a50_futures_overnight",
-                    "hsi_futures_overnight", "announcement_sentiment_score",
                     "theme_heat_score", "dragon_tiger_review_score",
                     "limit_up_review_signal", "auction_strength_score",
                     "auction_fake_order_risk", "days_to_next_event"):
@@ -729,6 +989,33 @@ def _ema(arr: np.ndarray, span: int) -> float:
 # ══════════════════════════════════════════════════════════════
 # 5. 主流程
 # ══════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════
+# 板块分组（用于板块相对强度因子）
+# ══════════════════════════════════════════════════════════════
+
+SECTOR_GROUPS: dict[str, set[str]] = {
+    "ai_optical":       {"300308", "300502", "300394"},
+    "ai_semiconductor":  {"002415", "603501", "002049", "300474", "300604",
+                          "002156", "600584", "002185", "603160",
+                          "000977", "603019", "300418", "300624", "000063", "002230"},
+    "ai_datacenter":    {"300383", "603881", "301236"},
+    "consumer_elec":    {"000333", "002475", "000651", "601138"},
+    "robotics":         {"603728", "300024", "002747", "002979", "300124",
+                          "300450", "300316", "002008", "300751"},
+    "power_energy":     {"600406", "601877", "002129", "600438", "300274",
+                          "003816", "601985"},
+    "apple_chain":      {"300433", "002456", "002600", "601231", "300136",
+                          "002241", "002635"},
+}
+
+
+def _get_sector(code: str) -> str:
+    for sector, codes in SECTOR_GROUPS.items():
+        if code in codes:
+            return sector
+    return "__other__"
+
 
 def _calc_min_lookback(config: dict) -> int:
     """根据所有启用因子中最大的计算窗口，反推最小 lookback。
@@ -802,7 +1089,14 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
     codes = _get_codes(config)
     financials = _load_financials(codes)
 
-    feature_loader = _build_feature_loader(raw_data, config, financials)
+    # 加载海外市场数据
+    overseas_data = _load_overseas_data(start_date, end_date)
+
+    # 构建全市场情绪数据（从池内OHLCV推算）
+    market_wide_data = _build_market_wide_from_pool(raw_data)
+
+    feature_loader = _build_feature_loader(raw_data, config, financials,
+                                           overseas_data, market_wide_data)
 
     # ── 回测 ──
     from core.backtest.engine import BacktestEngine
@@ -811,7 +1105,7 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
         start_date=start_date, end_date=end_date,
         initial_capital=initial_capital,
     )
-    strategy = ConfigDrivenStrategy(config, raw_data)
+    strategy = ConfigDrivenStrategy(config, raw_data, overseas_data)
 
     logger.info("开始回测 %s ~ %s (资金=¥%.0f)", start_date, end_date, initial_capital)
     result = engine.run(strategy, data_loader=data_loader, feature_loader=feature_loader)
