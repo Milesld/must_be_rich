@@ -1,0 +1,185 @@
+# ══════════════════════════════════════════════════════════
+# 策略配置 — 机器人/精密制造/智能装备 细分池
+# 仅主板+创业板，无科创板/北交所
+# Optimizer #1 (TPE全区间搜索, 夏普2.00, 2025-01~2026-06)
+# ══════════════════════════════════════════════════════════
+
+backtest:
+  start_date: "2025-01-01"
+  end_date: "2026-06-20"
+  initial_capital: 200000
+
+data_source:
+  provider: sina
+  lookback_days: 400
+  codes:
+    # ── 机器人核心部件 ──
+    - "603728"    # 鸣志电器（步进电机/空心杯电机）
+    - "300024"    # 机器人（新松机器人，国家队）
+    - "002747"    # 埃斯顿（工业机器人+伺服系统）
+    - "002979"    # 雷赛智能（运动控制卡/驱动器）
+    # ── 工控/自动化 ──
+    - "300124"    # 汇川技术（工控龙头+伺服+新能源）
+    - "300161"    # 华中数控（数控系统+机器人控制器）
+    - "002527"    # 新时达（机器人+电梯控制）
+    - "300607"    # 拓斯达（工业机器人+注塑自动化）
+    - "002698"    # 博实股份（特种机器人+智能装备）
+    - "002334"    # 英威腾（伺服驱动器+变频器）
+    - "300276"    # 三丰智能（智能输送+工业机器人集成）
+    - "300083"    # 创世纪（数控机床龙头）
+    # ── 精密制造/激光 ──
+    - "002008"    # 大族激光（激光设备龙头）
+    - "300450"    # 先导智能（锂电设备龙头，精密制造）
+    - "300316"    # 晶盛机电（晶体生长设备）
+    - "300751"    # 迈为股份（光伏设备+精密制造）
+    # ── 传感器/机器视觉 ──
+    - "002415"    # 海康威视（机器视觉+工业相机）
+    - "300400"    # 劲拓股份（焊接设备+AOI视觉检测）
+    # ── 液压/传动 ──
+    - "601100"    # 恒立液压（液压件龙头，机器人关节上游）
+    - "002444"    # 巨星科技（工具+服务机器人）
+    - "300154"    # 瑞凌股份（焊接机器人）
+
+strategy:
+  top_n: 3
+  rebalance_frequency: monthly
+  min_shares: 100
+  optimizer: equal_weight
+
+regime:
+  enabled: true
+  min_position_ratio: 0.20
+  max_position_ratio: 0.90
+  emergency_threshold: 0.40
+
+factor_max_weight:
+  atr_14: 0.25
+
+# ══════════════════════════════════════════════════════════
+# 6因子组合：RSI超卖反转 + 中期动量 + 低波动过滤
+# ══════════════════════════════════════════════════════════
+factors:
+  rsi_14:
+    enabled: true
+    weight: 0.400
+    module: core.features.technical
+    function: rsi
+    params: {window: 14}
+    description: "14日RSI — 超卖反转，捕捉周期股均值回归"
+
+  momentum_60d:
+    enabled: true
+    weight: 0.294
+    module: core.features.technical
+    function: momentum
+    params: {window: 60}
+    description: "60日累计收益率 — 中期趋势方向"
+
+  atr_14:
+    enabled: true
+    weight: 0.140
+    module: core.features.technical
+    function: atr
+    params: {window: 14}
+    description: "14日ATR — 波幅约束，压降了原有过重倾向"
+
+  volatility_20d:
+    enabled: true
+    weight: 0.114
+    module: core.features.technical
+    function: volatility
+    params: {window: 20}
+    description: "20日年化波动率 — 反转项，低波动机器人股更稳"
+
+  alpha_momentum_20d:
+    enabled: true
+    weight: 0.031
+    module: core.features.technical
+    function: alpha_momentum
+    params: {window: 20}
+    description: "剔除市场beta后的纯alpha动量 — 补足"
+
+  amplitude_20d:
+    enabled: true
+    weight: 0.021
+    module: core.features.technical
+    function: amplitude
+    params: {window: 20}
+    description: "20日平均振幅 — 微量补足"
+
+  momentum_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: momentum
+    params: {window: 20}
+
+  turnover_5d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: turnover
+    params: {window: 5}
+
+  turnover_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: turnover
+    params: {window: 20}
+
+  volume_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: volume_ratio
+    params: {window: 20}
+
+  amihud_illiq:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: amihud_illiq
+    params: {window: 20}
+
+  macd_dif:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_dif
+    params: {fast: 12, signal: 9, slow: 26}
+
+  macd_dea:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_dea
+    params: {fast: 12, signal: 9, slow: 26}
+
+  macd_hist:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_hist
+    params: {fast: 12, signal: 9, slow: 26}
+
+  bollinger_position:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: bollinger_position
+    params: {num_std: 2, window: 20}
+
+  ma_alignment:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: ma_alignment
+    params: {long: 60, mid: 20, short: 5}
+
+  sector_relative_strength_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: sector_relative_strength
+    params: {window: 20}

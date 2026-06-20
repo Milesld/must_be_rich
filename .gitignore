@@ -25,6 +25,7 @@ data/reports/
 data/premarket_recommendations/
 data/logs/
 data/backups/
+run_and_logs/
 ~/.quant_system/
 
 # IDE

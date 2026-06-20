@@ -205,6 +205,7 @@ def optimize_optuna(
     n_trials: int = 100,
     min_factors: int = 2,
     max_factors: int = 10,
+    factor_max_weight: dict[str, float] | None = None,
 ) -> list[dict] | None:
     try:
         import optuna
@@ -221,8 +222,11 @@ def optimize_optuna(
         if len(selected) < min_factors:
             remaining = [c for c in candidates if c not in selected]
             if remaining:
-                idx = trial.suggest_categorical("_fill", list(range(len(remaining))))
-                selected.append(remaining[idx % len(remaining)])
+                # suggest_int 范围固定为候选池总长度，避免 CategoricalDistribution 动态报错
+                idx = trial.suggest_int("_fill", 0, len(candidates) - 1)
+                # 优先取 remaining 中最接近 idx 位置的因子
+                pick = remaining[min(idx, len(remaining) - 1)]
+                selected.append(pick)
         if len(selected) > max_factors:
             selected = selected[:max_factors]
         if len(selected) < 2:
@@ -236,12 +240,11 @@ def optimize_optuna(
         weights_float = [float(w) for w in weights]
 
         # 单因子权重上限：防止 optimizer 把宝全押在一个因子上
-        # amihud_illiq 上限 0.20 — 流动性因子只是约束项，不是 Alpha 来源
-        # 其他因子上限 0.40 — 给 MACD/量价类因子空间但不极端
-        FACTOR_MAX_WEIGHT = {
-            "amihud_illiq": 0.20,
-        }
+        # 默认: amihud_illiq 0.20, 其他 0.40。可通过 factor_max_weight 按策略覆盖
         DEFAULT_MAX_WEIGHT = 0.40
+        FACTOR_MAX_WEIGHT: dict[str, float] = {"amihud_illiq": 0.20}
+        if factor_max_weight:
+            FACTOR_MAX_WEIGHT.update(factor_max_weight)
         MAX_REDISTRIBUTE = 5  # 最多重分配 5 次以防死循环
         for _ in range(MAX_REDISTRIBUTE):
             over: list[int] = []
@@ -476,6 +479,9 @@ def optimize(
     base_config = load_config(config_path)
     all_factors = base_config.get("factors", {})
 
+    # 从 YAML 读取单因子权重上限（可选，未配置则使用 optimizer 内置默认值）
+    factor_max_weight = base_config.get("factor_max_weight", None)
+
     # 确定候选池，排除无数据源的因子
     if task and task in FACTOR_POOL:
         raw_candidates = [c for c in FACTOR_POOL[task]["candidates"] if c in all_factors]
@@ -527,7 +533,7 @@ def optimize(
     print(f"  基线夏普: {baseline.get('sharpe_ratio', 0):.3f}")
 
     # 搜索
-    optuna_results = optimize_optuna(base_config, candidates, rounds, min_factors, max_factors)
+    optuna_results = optimize_optuna(base_config, candidates, rounds, min_factors, max_factors, factor_max_weight)
     if optuna_results is not None:
         print("  ✓ 使用 Optuna TPE 引擎")
         results = optuna_results

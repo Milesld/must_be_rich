@@ -1,0 +1,191 @@
+# ══════════════════════════════════════════════════════════
+# 策略配置 — AI/半导体/光模块/算力/数据中心 细分池
+# 仅主板+创业板，无科创板/北交所
+# Optimizer #1 (TPE全区间搜索, 夏普1.98, 2025-01~2026-06)
+# ══════════════════════════════════════════════════════════
+
+backtest:
+  start_date: "2025-01-01"
+  end_date: "2026-06-20"
+  initial_capital: 200000
+
+data_source:
+  provider: sina
+  lookback_days: 400
+  codes:
+    # ── 芯片设计 ──
+    - "002415"    # 海康威视（AI视觉+安防芯片）
+    - "603501"    # 韦尔股份（CIS图像传感器龙头）
+    - "002049"    # 紫光国微（特种芯片+FPGA）
+    - "603160"    # 汇顶科技（指纹识别+触控芯片）
+    - "603986"    # 兆易创新（存储+MCU龙头）
+    - "300661"    # 圣邦股份（模拟芯片龙头）
+    - "300474"    # 景嘉微（国产GPU）
+    - "002409"    # 雅克科技（半导体材料+前驱体）
+    # ── 半导体设备/材料 ──
+    - "002371"    # 北方华创（半导体设备绝对龙头）
+    - "300604"    # 长川科技（测试分选设备）
+    - "300346"    # 南大光电（光刻胶+MO源）
+    - "002436"    # 兴森科技（IC载板+PCB）
+    - "002916"    # 深南电路（封装基板+高端PCB）
+    # ── 晶圆制造/封测 ──
+    - "002156"    # 通富微电（先进封装）
+    - "600584"    # 长电科技（封测龙头）
+    - "002185"    # 华天科技（封测）
+    - "000725"    # 京东方A（显示面板，芯片应用端）
+    # ── AI算力/服务器 ──
+    - "000977"    # 浪潮信息（AI服务器龙头）
+    - "603019"    # 中科曙光（超算+AI服务器）
+    - "600410"    # 华胜天成（云计算+数据中心）
+    # ── 光模块/光通信 ──
+    - "300308"    # 中际旭创（800G光模块全球龙头）
+    - "300502"    # 新易盛（光模块第二）
+    - "300394"    # 天孚通信（光器件龙头）
+    - "002281"    # 光迅科技（光模块+光芯片）
+    - "000988"    # 华工科技（激光+光模块）
+    # ── 通信设备 ──
+    - "000063"    # 中兴通讯（5G+AI算力网络）
+    - "600498"    # 烽火通信（光通信设备）
+    # ── 数据中心/IDC ──
+    - "300383"    # 光环新网（IDC龙头）
+    - "603881"    # 数据港（定制化数据中心）
+    - "300738"    # 奥飞数据（华南IDC）
+
+strategy:
+  top_n: 3
+  rebalance_frequency: monthly
+  min_shares: 100
+  optimizer: equal_weight
+
+regime:
+  enabled: true
+  min_position_ratio: 0.20
+  max_position_ratio: 0.90
+  emergency_threshold: 0.40
+
+# ══════════════════════════════════════════════════════════
+# 4因子组合：趋势动量主导 + 板块相对强度
+# ══════════════════════════════════════════════════════════
+factors:
+  momentum_60d:
+    enabled: true
+    weight: 0.405
+    module: core.features.technical
+    function: momentum
+    params: {window: 60}
+    description: "60日累计收益率 — 半导体中期趋势核心信号"
+
+  turnover_5d:
+    enabled: true
+    weight: 0.400
+    module: core.features.technical
+    function: turnover
+    params: {window: 5}
+    description: "5日平均换手率 — 半导体启动必须有量确认"
+
+  sector_relative_strength_20d:
+    enabled: true
+    weight: 0.174
+    module: core.features.technical
+    function: sector_relative_strength
+    params: {window: 20}
+    description: "板块内相对强度 — 同类里挑最强的"
+
+  bollinger_position:
+    enabled: true
+    weight: 0.020
+    module: core.features.technical
+    function: bollinger_position
+    params: {num_std: 2, window: 20}
+    description: "布林带位置 — 微量补足"
+
+  momentum_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: momentum
+    params: {window: 20}
+
+  alpha_momentum_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: alpha_momentum
+    params: {window: 20}
+
+  volatility_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: volatility
+    params: {window: 20}
+
+  amplitude_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: amplitude
+    params: {window: 20}
+
+  atr_14:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: atr
+    params: {window: 14}
+
+  turnover_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: turnover
+    params: {window: 20}
+
+  volume_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: volume_ratio
+    params: {window: 20}
+
+  amihud_illiq:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: amihud_illiq
+    params: {window: 20}
+
+  rsi_14:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: rsi
+    params: {window: 14}
+
+  macd_dif:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_dif
+    params: {fast: 12, signal: 9, slow: 26}
+
+  macd_dea:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_dea
+    params: {fast: 12, signal: 9, slow: 26}
+
+  macd_hist:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_hist
+    params: {fast: 12, signal: 9, slow: 26}
+
+  ma_alignment:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: ma_alignment
+    params: {long: 60, mid: 20, short: 5}
