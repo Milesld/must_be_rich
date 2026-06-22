@@ -809,15 +809,26 @@ def _compute_factor_value(
     params = fg.get("params", {})
 
     try:
-        if name == "momentum_20d":
+        if name == "momentum_20d" or name.startswith("momentum_"):
             w = params.get("window", 20)
+            # 尝试从因子名解析窗口（如 momentum_60d → 60）
+            if not params.get("window") and "_" in name:
+                try:
+                    w = int(name.split("_")[-1].replace("d", ""))
+                except ValueError:
+                    pass
             return float((arr[-1] / arr[-min(w, len(arr))] - 1.0)) if len(arr) >= w + 1 else 0.0
 
-        if name == "volatility_20d":
+        if name == "volatility_20d" or name.startswith("volatility_"):
             w = params.get("window", 20)
+            if not params.get("window") and "_" in name:
+                try:
+                    w = int(name.split("_")[-1].replace("d", ""))
+                except ValueError:
+                    pass
             return float(np.nanstd(rets[-w:]) * np.sqrt(252)) if len(rets) >= 5 else 0.0
 
-        if name == "rsi_14":
+        if name == "rsi_14" or name.startswith("rsi_"):
             w = params.get("window", 14)
             gains = np.maximum(rets[-w:], 0)
             losses = -np.minimum(rets[-w:], 0)
@@ -828,20 +839,26 @@ def _compute_factor_value(
             rs = avg_gain / avg_loss
             return float(100.0 - 100.0 / (1.0 + rs))
 
-        if name == "atr_14":
+        if name == "atr_14" or name.startswith("atr_"):
             w = params.get("window", 14)
             tr = np.maximum(high[-w:] - low[-w:],
                     np.maximum(np.abs(high[-w:] - prev_close[-w:]),
                                np.abs(low[-w:] - prev_close[-w:])))
             return float(tr.mean())
 
-        if name == "amplitude_20d":
+        if name == "amplitude_20d" or name.startswith("amplitude_"):
             w = params.get("window", 20)
             amp = (high[-w:] - low[-w:]) / prev_close[-w:]
             return float(amp.mean())
 
-        if name == "turnover_5d":
+        if name == "turnover_5d" or name.startswith("turnover_"):
             w = params.get("window", 5)
+            # 尝试从因子名解析窗口
+            if not params.get("window") and "_" in name:
+                try:
+                    w = int(name.split("_")[-1].replace("d", ""))
+                except ValueError:
+                    pass
             if len(vols) >= w:
                 denom = arr[-w:] if len(arr) >= w else arr
                 return float(vols[-w:].mean() / denom.mean()) if denom.mean() > 0 else 0.0
