@@ -72,19 +72,26 @@ class MarketRegimeDetector:
         self._vol_lookback_years = cfg.get("vol_lookback_years", 3)
         self._val_lookback_years = cfg.get("val_lookback_years", 10)
         self._weights = cfg.get("dimension_weights", {
-            "trend": 0.20, "volatility": 0.20, "valuation": 0.15,
-            "breadth": 0.20, "overseas": 0.25,
+            "trend": 0.25, "volatility": 0.25, "valuation": 0.05,
+            "breadth": 0.10, "overseas": 0.35,
         })
         self._overseas_short_window = cfg.get("overseas_short_window", 5)
         self._overseas_long_window = cfg.get("overseas_long_window", 20)
-        # 评分→仓位映射
+        # 评分→仓位映射（细粒度，动量策略对评分下降更敏感）
         self._position_map = cfg.get("position_ratio_map", {
-            (0.70, 1.00): 0.85,
-            (0.50, 0.70): 0.65,
-            (0.30, 0.50): 0.50,
-            (0.15, 0.30): 0.35,
-            (0.00, 0.15): 0.20,
+            (0.80, 1.00): 0.90,
+            (0.70, 0.80): 0.80,
+            (0.60, 0.70): 0.70,
+            (0.50, 0.60): 0.60,
+            (0.40, 0.50): 0.50,
+            (0.30, 0.40): 0.40,
+            (0.20, 0.30): 0.30,
+            (0.10, 0.20): 0.25,
+            (0.00, 0.10): 0.20,
         })
+        # 动量崩溃检测：连续评分下降超过此阈值 → 额外降仓
+        self._crash_threshold = cfg.get("crash_threshold", 0.15)
+        self._last_score: float | None = None
 
     # ── 主入口 ──────────────────────────────
 
@@ -136,11 +143,17 @@ class MarketRegimeDetector:
         )
         composite = max(0.0, min(1.0, composite))
 
-        regime = self._score_to_label(composite)
+        # ★ 动量崩溃检测：评分快速下降 → 额外降仓
         position_ratio = self._score_to_position(composite)
+        if self._last_score is not None and self._last_score - composite > self._crash_threshold:
+            # 评分骤降 >0.15 → 仓位降一档，防止动量踩踏
+            position_ratio = max(0.20, position_ratio - 0.15)
+        self._last_score = composite
+
+        regime_label = self._score_to_label(composite)
 
         return RegimeResult(
-            regime_label=regime,
+            regime_label=regime_label,
             composite_score=composite,
             dimension_scores=scores,
             suggested_position_ratio=position_ratio,

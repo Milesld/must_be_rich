@@ -108,10 +108,15 @@ FACTOR_POOL = {
     "premarket": {
         "label": "盘前推荐（日频）",
         "candidates": [
-            "momentum_20d", "volatility_20d", "volume_ratio", "turnover_5d",
+            # 技术面（7个）
+            "momentum_20d", "momentum_60d", "volatility_20d", "volume_ratio",
+            "turnover_5d", "rsi_14", "bollinger_position",
+            # 海外映射（3个）
             "overnight_adr_mapped", "a50_futures_overnight", "hsi_futures_overnight",
+            # 全市场情绪（5个）
             "limit_up_count", "limit_up_chain_height", "limit_down_count",
             "board_break_ratio", "limit_up_ratio",
+            # NLP情绪（1个）
             "announcement_sentiment_score",
         ],
     },

@@ -1,45 +1,37 @@
 # ══════════════════════════════════════════════════════════
-# 策略配置 — AI应用/软件/大模型/数据要素 细分池
-# 仅主板+创业板，无科创板/北交所
-# Optimizer #1 (TPE全区间搜索, 夏普1.34, 2025-01~2026-06)
+# Optimizer #2 (TPE全区间搜索, 夏普1.30, 2023-01~2025-12, 数组方向+lookback已修复)
 # ══════════════════════════════════════════════════════════
 
 backtest:
-  end_date: '2026-06-20'
+  start_date: "2026-01-01"
+  end_date: "2026-06-24"
   initial_capital: 200000
-  start_date: '2025-01-01'
 
 data_source:
   provider: sina
   lookback_days: 400
   codes:
-    # ── AI大模型/应用 ──
-    - "002230"    # 科大讯飞（星火大模型+语音AI）
-    - "300418"    # 昆仑万维（天工大模型+AI社交）
-    - "300624"    # 万兴科技（AI视频/文档创作工具）
-    - "300229"    # 拓尔思（NLP+大数据+AI搜索）
-    # ── 金融/行业AI ──
-    - "300033"    # 同花顺（AI投顾+金融数据）
-    - "002657"    # 中科金财（AI金融+数字人民币）
-    - "300454"    # 深信服（AI安全+云计算）
-    - "300253"    # 卫宁健康（AI医疗信息化）
-    - "300271"    # 华宇软件（AI司法+政务）
-    - "300451"    # 创业慧康（AI医疗）
-    - "300188"    # 国投智能（AI安全+电子取证）
-    # ── 软件/信创 ──
-    - "600536"    # 中国软件（麒麟OS，信创国家队）
-    - "002063"    # 远光软件（ERP+AI财务）
-    - "300496"    # 中科创达（智能OS+汽车AI）
-    - "002368"    # 太极股份（信创+数字政务）
-    - "300170"    # 汉得信息（ERP实施+AI应用）
-    # ── 数据要素/大数据 ──
-    - "300212"    # 易华录（数据湖+数据要素）
-    - "603138"    # 海量数据（数据库）
-    - "300166"    # 东方国信（大数据平台+工业互联网）
-    # ── 安防/视觉AI ──
-    - "002415"    # 海康威视（AI安防+机器视觉）
-    # ── 智能终端AI ──
-    - "300678"    # 中科信息（AI政务+智能识别）
+    - "002230"
+    - "300418"
+    - "300624"
+    - "300229"
+    - "300033"
+    - "002657"
+    - "300454"
+    - "300253"
+    - "300271"
+    - "300451"
+    - "300188"
+    - "600536"
+    - "002063"
+    - "300496"
+    - "002368"
+    - "300170"
+    - "300212"
+    - "603138"
+    - "300166"
+    - "002415"
+    - "300678"
 
 strategy:
   min_shares: 100
@@ -54,121 +46,61 @@ regime:
   min_position_ratio: 0.2
 
 # ══════════════════════════════════════════════════════════
-# 8因子组合：alpha动量主导 + 低波动反转 + MACD辅助
+# 4因子组合：低波动+低振幅双反转 + 布林回归
 # ══════════════════════════════════════════════════════════
 factors:
-  alpha_momentum_20d:
-    enabled: true
-    weight: 0.346
-    module: core.features.technical
-    function: alpha_momentum
-    description: "剔除市场beta后的纯alpha动量 — AI软件池最核心的信号"
-    params: {window: 20}
-
-  macd_dif:
-    enabled: true
-    weight: 0.245
-    module: core.features.technical
-    function: macd_dif
-    description: "MACD快慢线差值 — 趋势加速/减速辅助"
-    params: {fast: 12, signal: 9, slow: 26}
-
   volatility_20d:
     enabled: true
-    weight: 0.224
+    weight: 0.4
     module: core.features.technical
     function: volatility
+    params: {window: 20}
     description: "20日年化波动率 — 反转项，AI软件股中低波动更稳"
-    params: {window: 20}
-
-  momentum_60d:
-    enabled: true
-    weight: 0.099
-    module: core.features.technical
-    function: momentum
-    description: "60日累计收益率 — 中期趋势方向"
-    params: {window: 60}
-
-  atr_14:
-    enabled: true
-    weight: 0.042
-    module: core.features.technical
-    function: atr
-    description: "14日ATR — 波幅约束"
-    params: {window: 14}
-
-  rsi_14:
-    enabled: true
-    weight: 0.021
-    module: core.features.technical
-    function: rsi
-    description: "14日RSI — 小权重多元化"
-    params: {window: 14}
-
-  amihud_illiq:
-    enabled: true
-    weight: 0.015
-    module: core.features.technical
-    function: amihud_illiq
-    description: "Amihud非流动性 — 轻量约束"
-    params: {window: 20}
 
   amplitude_20d:
     enabled: true
-    weight: 0.007
+    weight: 0.4
     module: core.features.technical
     function: amplitude
-    description: "20日平均振幅 — 微量补足"
     params: {window: 20}
+    description: "20日平均振幅 — 反转项，低振幅排除题材炒作股"
 
   bollinger_position:
-    enabled: false
-    weight: 0.0
+    enabled: true
+    weight: 0.118
     module: core.features.technical
     function: bollinger_position
     params: {num_std: 2, window: 20}
-
-  ma_alignment:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: ma_alignment
-    params: {long: 60, mid: 20, short: 5}
-
-  macd_dea:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: macd_dea
-    params: {fast: 12, signal: 9, slow: 26}
-
-  macd_hist:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: macd_hist
-    params: {fast: 12, signal: 9, slow: 26}
+    description: "布林带位置 — 均值回归买入机会"
 
   momentum_20d:
+    enabled: true
+    weight: 0.082
+    module: core.features.technical
+    function: momentum
+    params: {window: 20}
+    description: "20日累计收益率 — 短期趋势补足"
+
+  momentum_60d:
     enabled: false
     weight: 0.0
     module: core.features.technical
     function: momentum
-    params: {window: 20}
+    params: {window: 60}
 
-  sector_relative_strength_20d:
+  alpha_momentum_20d:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: sector_relative_strength
+    function: alpha_momentum
     params: {window: 20}
 
-  turnover_20d:
+  atr_14:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: turnover
-    params: {window: 20}
+    function: atr
+    params: {window: 14}
 
   turnover_5d:
     enabled: false
@@ -177,9 +109,52 @@ factors:
     function: turnover
     params: {window: 5}
 
+  turnover_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: turnover
+    params: {window: 20}
+
   volume_ratio:
     enabled: false
     weight: 0.0
     module: core.features.technical
     function: volume_ratio
     params: {window: 20}
+
+  amihud_illiq:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: amihud_illiq
+    params: {window: 20}
+
+  rsi_14:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: rsi
+    params: {window: 14}
+
+  macd_dif:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_dif
+    params: {fast: 12, signal: 9, slow: 26}
+
+  ma_alignment:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: ma_alignment
+    params: {long: 60, mid: 20, short: 5}
+
+  sector_relative_strength_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: sector_relative_strength
+    params: {window: 20}
+

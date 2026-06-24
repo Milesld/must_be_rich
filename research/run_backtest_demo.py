@@ -64,11 +64,12 @@ class ConfigDrivenStrategy:
     其中 reverse=True 表示因子值越低越好（如波动率、PE）。
     """
 
-    # 哪些因子是"越低越好"（反转排名）
-    INVERSE_FACTORS = {
-        "volatility_20d", "pe_ttm", "pb", "debt_ratio",
-        "amihud_illiq", "amplitude_20d",
-    }
+    # 哪些因子是"越低越好"（反转排名）— 支持前缀匹配覆盖窗口变体
+    INVERSE_EXACT = {"pe_ttm", "pb", "debt_ratio", "amihud_illiq"}
+    INVERSE_PREFIXES = ("volatility_", "amplitude_", "atr_")
+
+    def _is_inverse(self, name: str) -> bool:
+        return name in self.INVERSE_EXACT or name.startswith(self.INVERSE_PREFIXES)
 
     def __init__(self, config: dict, raw_data: dict | None = None,
                  overseas_data: dict | None = None) -> None:
@@ -176,7 +177,10 @@ class ConfigDrivenStrategy:
         total_value = cash + pos_value
         target_pos_value = total_value * suggested_pos_ratio
 
-        # 卖出不在目标池的持仓
+        # ★ 等权重置：目标池每只股票占等额资金（含已持有+新买入）
+        per_stock_target_value = target_pos_value / self.top_n
+
+        # 卖出不在目标池的全部持仓
         for code, shares in list(positions.items()):
             if shares > 0 and code not in target_codes:
                 price = float(daily_data.get(code, {}).get("close", 0))
@@ -186,27 +190,34 @@ class ConfigDrivenStrategy:
                         code=code, side="sell", price=price, shares=shares,
                     ))
 
-        # 如果当前仓位已经超过目标，不再买入
-        if pos_value >= target_pos_value * 0.95:
-            return intents
+        # 对目标池中的每只股票，调至目标权重
+        for code in target_codes:
+            price = float(daily_data.get(code, {}).get("close", 0))
+            if price <= 0:
+                continue
+            current_shares = positions.get(code, 0)
+            current_value = current_shares * price
+            target_shares_total = int(per_stock_target_value / price)
+            target_shares_total = (target_shares_total // 100) * 100
 
-        # 可用买入资金 = min(cash, target_pos_value - current_pos_value)
-        buy_budget = min(cash, max(0, target_pos_value - pos_value))
-
-        # 等权买入目标池中的新股
-        new_codes = [c for c in target_codes if positions.get(c, 0) == 0]
-        if new_codes and buy_budget > 0:
-            per_stock_cash = buy_budget / len(new_codes)
-            for code in new_codes:
-                price = float(daily_data.get(code, {}).get("close", 0))
-                if price <= 0:
-                    continue
-                shares = int(per_stock_cash / price)
-                shares = (shares // 100) * 100
-                if shares >= self.min_shares:
+            if current_value > per_stock_target_value * 1.15:
+                # 超配 → 卖出超额部分
+                excess_value = current_value - per_stock_target_value
+                sell_shares = int(excess_value / price)
+                sell_shares = (sell_shares // 100) * 100
+                if sell_shares >= self.min_shares:
                     intents.append(TradeIntent(
-                        signal_id=f"buy_{code}_{trade_date}",
-                        code=code, side="buy", price=price, shares=shares,
+                        signal_id=f"rebal_sell_{code}_{trade_date}",
+                        code=code, side="sell", price=price, shares=sell_shares,
+                    ))
+            elif target_shares_total > current_shares:
+                # 低配或未持有 → 买入差额
+                buy_shares = target_shares_total - current_shares
+                buy_shares = (buy_shares // 100) * 100
+                if buy_shares >= self.min_shares:
+                    intents.append(TradeIntent(
+                        signal_id=f"rebal_buy_{code}_{trade_date}",
+                        code=code, side="buy", price=price, shares=buy_shares,
                     ))
 
         if regime_info:
@@ -268,7 +279,7 @@ class ConfigDrivenStrategy:
                 continue
 
             rank = vals.rank(pct=True)
-            if name in self.INVERSE_FACTORS:
+            if self._is_inverse(name):
                 rank = 1.0 - rank
 
             common = scores.index.intersection(rank.index)
@@ -668,7 +679,24 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
 
     factors = _enabled_factors(config)
     factor_settings = config.get("factor_settings", {})
-    lookback = factor_settings.get("lookback_window", 60)
+    # ★ 从所有启用因子中自动推算最小 lookback（最长窗口 + 缓冲）
+    _max_win = 22
+    for fg in factors:
+        for v in fg.get("params", {}).values():
+            if isinstance(v, (int, float)):
+                _max_win = max(_max_win, int(v))
+    # 因子名含窗口的情况（如 momentum_60d → 60, volatility_20d → 20）
+    for fg in factors:
+        name = fg["name"]
+        parts = name.split("_")
+        if len(parts) >= 2:
+            try:
+                w = int(parts[-1].replace("d", ""))
+                _max_win = max(_max_win, w)
+            except ValueError:
+                pass
+    cfg_lookback = config["data_source"].get("lookback_days", 400)
+    lookback = max(factor_settings.get("lookback_window", 60), _max_win + 10)
     min_points = factor_settings.get("min_price_points", 22)
 
     def loader(trade_date: date, codes: list[str]) -> pd.DataFrame:
@@ -700,6 +728,11 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
                     high_hist.setdefault(code, []).append(fields.get("high", close))
                     low_hist.setdefault(code, []).append(fields.get("low", close))
                     open_hist.setdefault(code, []).append(fields.get("open", close))
+
+        # ★ get_prev_n_trading_days 返回 [最新→最旧]，反转使 arr[0]=最旧, arr[-1]=最新
+        for h in [price_hist, vol_hist, amount_hist, high_hist, low_hist, open_hist]:
+            for code in h:
+                h[code].reverse()
 
         results: list[dict] = []
         target = list(codes) if codes else list(price_hist.keys())
@@ -752,7 +785,7 @@ def _add_cross_sectional_factors(
     factor_names = {f["name"] for f in factors}
 
     # alpha_momentum: 个股动量 - 等权市场平均动量
-    if "alpha_momentum_20d" in factor_names:
+    if any(n.startswith("alpha_momentum_") for n in factor_names):
         w = 20
         # 直接从价格序列重算动量，避免依赖其他因子列
         mom_values: dict[str, float] = {}
@@ -771,7 +804,7 @@ def _add_cross_sectional_factors(
             df["alpha_momentum_20d"] = 0.0
 
     # sector_relative_strength: 个股动量在板块内的百分位排名
-    if "sector_relative_strength_20d" in factor_names:
+    if any(n.startswith("sector_relative_strength_") for n in factor_names):
         w = 20
         mom_values = {}
         for code in df["code"]:
@@ -893,11 +926,10 @@ def _compute_factor_value(
             ma_s = arr[-min(s, len(arr)):].mean()
             ma_m = arr[-min(m, len(arr)):].mean()
             ma_l = arr[-min(l, len(arr)):].mean()
-            if ma_s > ma_m > ma_l:
-                return 1.0
-            elif ma_s < ma_m < ma_l:
-                return -1.0
-            return 0.0
+            # 连续评分：短/长均线偏离度 ∈ [-0.2, 0.2] → 归一化到 [0, 1]
+            ratio = ma_s / max(ma_l, 0.01) - 1.0
+            score = max(-0.2, min(0.2, ratio))
+            return (score + 0.2) / 0.4
 
         if name == "amihud_illiq":
             w = params.get("window", 20)
@@ -1071,7 +1103,9 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
                 len(enabled), config["strategy"]["top_n"],
                 config["strategy"]["rebalance_frequency"], initial_capital)
     for f in enabled:
-        direction = "↓(越低越好)" if f["name"] in ConfigDrivenStrategy.INVERSE_FACTORS else "↑"
+        _inv = f["name"] in ConfigDrivenStrategy.INVERSE_EXACT or \
+               f["name"].startswith(ConfigDrivenStrategy.INVERSE_PREFIXES)
+        direction = "↓(越低越好)" if _inv else "↑"
         logger.info("  %s (权重=%.2f) %s", f["name"], f.get("weight", 0), direction)
 
     # ── 数据加载 ──

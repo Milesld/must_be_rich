@@ -1,113 +1,90 @@
 # ══════════════════════════════════════════════════════════
-# 策略配置 — 苹果供应链/消费电子 细分池
-# 仅主板+创业板，无科创板/北交所
-# Optimizer #1 (TPE全区间搜索, 夏普1.99, 2025-01~2026-06)
+# Optimizer #2 (TPE全区间搜索, 夏普1.17, 2023-01~2025-12, 数组方向+lookback已修复)
 # ══════════════════════════════════════════════════════════
 
 backtest:
-  start_date: "2025-01-01"
-  end_date: "2026-06-20"
+  start_date: "2026-01-01"
+  end_date: "2026-06-24"
   initial_capital: 200000
 
 data_source:
   provider: sina
   lookback_days: 400
   codes:
-    # ── 苹果核心供应链 ──
-    - "002475"    # 立讯精密（AirPods+iPhone组装，果链龙头）
-    - "601138"    # 工业富联（iPhone组装+AI服务器）
-    - "300433"    # 蓝思科技（玻璃盖板+UTG折叠屏）
-    - "002456"    # 欧菲光（摄像头模组）
-    - "002600"    # 领益智造（精密功能件+散热）
-    - "601231"    # 环旭电子（SiP系统级封装）
-    - "300136"    # 信维通信（天线+无线充电+LCP）
-    - "002241"    # 歌尔股份（声学+VR/AR整机）
-    - "002635"    # 安洁科技（精密结构件+散热）
-    - "002938"    # 鹏鼎控股（FPC软板全球龙头）
-    - "300115"    # 长盈精密（金属中框+连接器+机器人）
-    - "300735"    # 光弘科技（EMS代工）
-    # ── 消费电子/家电 ──
-    - "000333"    # 美的集团（家电+机器人）
-    - "000651"    # 格力电器（空调+精密制造）
-    - "002681"    # 奋达科技（智能音箱+穿戴设备）
-    - "002351"    # 漫步者（TWS耳机品牌）
-    # ── 电池/电源 ──
-    - "300207"    # 欣旺达（消费电池+动力电池）
-    - "300014"    # 亿纬锂能（锂电+消费电池）
-    # ── 面板/显示 ──
-    - "000725"    # 京东方A（面板龙头）
-    - "002387"    # 维信诺（OLED面板）
-    - "300408"    # 三环集团（陶瓷背盖+MLCC）
-    # ── 连接器/线材 ──
-    - "002055"    # 得润电子（连接器+汽车电子）
+    - "002475"
+    - "601138"
+    - "300433"
+    - "002456"
+    - "002600"
+    - "601231"
+    - "300136"
+    - "002241"
+    - "002635"
+    - "002938"
+    - "300115"
+    - "300735"
+    - "000333"
+    - "000651"
+    - "002681"
+    - "002351"
+    - "300207"
+    - "300014"
+    - "000725"
+    - "002387"
+    - "300408"
+    - "002055"
 
 strategy:
-  top_n: 3
-  rebalance_frequency: monthly
   min_shares: 100
   optimizer: equal_weight
+  rebalance_frequency: monthly
+  top_n: 3
 
 regime:
+  emergency_threshold: 0.4
   enabled: true
-  min_position_ratio: 0.20
-  max_position_ratio: 0.90
-  emergency_threshold: 0.40
+  max_position_ratio: 0.9
+  min_position_ratio: 0.2
 
 # ══════════════════════════════════════════════════════════
-# 8因子组合：低波动质量主导 + 布林均值回归 + 均线辅助
+# 8因子组合：振幅主导 + ATR波动 + 换手辅助
 # ══════════════════════════════════════════════════════════
 factors:
-  volatility_20d:
+  amplitude_20d:
     enabled: true
-    weight: 0.400
+    weight: 0.4
     module: core.features.technical
-    function: volatility
+    function: amplitude
     params: {window: 20}
-    description: "20日年化波动率 — 反转项，低波动=订单稳客户稳业绩稳"
+    description: "20日平均振幅 — 苹果链最核心信号（反转项）"
 
   atr_14:
     enabled: true
-    weight: 0.215
+    weight: 0.283
     module: core.features.technical
     function: atr
     params: {window: 14}
-    description: "14日ATR — 日内波幅小=机构持仓集中"
+    description: "14日ATR — 波幅约束（反转项）"
 
-  bollinger_position:
+  turnover_20d:
     enabled: true
-    weight: 0.116
+    weight: 0.152
     module: core.features.technical
-    function: bollinger_position
-    params: {num_std: 2, window: 20}
-    description: "布林带位置 — 偏低=均值回归买入机会"
+    function: turnover
+    params: {window: 20}
+    description: "20日平均换手率 — 中期参与度"
 
-  ma_alignment:
+  momentum_60d:
     enabled: true
     weight: 0.085
     module: core.features.technical
-    function: ma_alignment
-    params: {long: 60, mid: 20, short: 5}
-    description: "均线多空排列 — 多头排列加分"
-
-  rsi_14:
-    enabled: true
-    weight: 0.064
-    module: core.features.technical
-    function: rsi
-    params: {window: 14}
-    description: "14日RSI — 超卖反转信号"
-
-  momentum_20d:
-    enabled: true
-    weight: 0.061
-    module: core.features.technical
     function: momentum
-    params: {window: 20}
-    description: "20日累计收益率 — 短期趋势"
+    params: {window: 60}
+    description: "60日累计收益率 — 中期趋势"
 
   macd_dif:
     enabled: true
-    weight: 0.031
+    weight: 0.032
     module: core.features.technical
     function: macd_dif
     params: {fast: 12, signal: 9, slow: 26}
@@ -115,18 +92,34 @@ factors:
 
   amihud_illiq:
     enabled: true
-    weight: 0.029
+    weight: 0.025
     module: core.features.technical
     function: amihud_illiq
     params: {window: 20}
     description: "Amihud非流动性 — 轻量约束"
 
-  momentum_60d:
+  rsi_14:
+    enabled: true
+    weight: 0.016
+    module: core.features.technical
+    function: rsi
+    params: {window: 14}
+    description: "14日RSI — 超卖反转补足"
+
+  volume_ratio:
+    enabled: true
+    weight: 0.008
+    module: core.features.technical
+    function: volume_ratio
+    params: {window: 20}
+    description: "量比 — 微量补足"
+
+  momentum_20d:
     enabled: false
     weight: 0.0
     module: core.features.technical
     function: momentum
-    params: {window: 60}
+    params: {window: 20}
 
   alpha_momentum_20d:
     enabled: false
@@ -135,18 +128,11 @@ factors:
     function: alpha_momentum
     params: {window: 20}
 
-  amplitude_20d:
+  volatility_20d:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: amplitude
-    params: {window: 20}
-
-  turnover_20d:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: turnover
+    function: volatility
     params: {window: 20}
 
   turnover_5d:
@@ -156,26 +142,19 @@ factors:
     function: turnover
     params: {window: 5}
 
-  volume_ratio:
+  bollinger_position:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: volume_ratio
-    params: {window: 20}
+    function: bollinger_position
+    params: {num_std: 2, window: 20}
 
-  macd_dea:
+  ma_alignment:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: macd_dea
-    params: {fast: 12, signal: 9, slow: 26}
-
-  macd_hist:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: macd_hist
-    params: {fast: 12, signal: 9, slow: 26}
+    function: ma_alignment
+    params: {long: 60, mid: 20, short: 5}
 
   sector_relative_strength_20d:
     enabled: false
@@ -183,3 +162,4 @@ factors:
     module: core.features.technical
     function: sector_relative_strength
     params: {window: 20}
+

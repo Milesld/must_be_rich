@@ -107,6 +107,9 @@ python research/factor_optimizer.py --task long_term --rounds 100 --search-years
 # ④ 多策略并行：复制 YAML → 改参 → 跑
 cp configs/strategy.yaml configs/strategy_test.yaml
 python research/run_backtest_demo.py configs/strategy_test.yaml
+
+# ⑤ 每日选股：看看今天该买什么
+python research/pick_stocks.py
 ```
 
 ### 市场状态判断（regime）
