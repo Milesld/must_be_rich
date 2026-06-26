@@ -134,7 +134,9 @@ def auction_volume_ratio(data: pd.DataFrame, params: dict) -> pd.Series:
 
     window = params.get("avg_window", 20)
     vol = data["auction_volume"]
-    avg_vol = data["volume"].groupby(data["code"]).rolling(window).mean().droplevel(0)
+    # ★ shift(1) 排除当日全天成交量（9:25竞价时当日成交量尚未发生）
+    past_vol = data.groupby("code")["volume"].shift(1)
+    avg_vol = past_vol.groupby(data["code"]).rolling(window, min_periods=1).mean().droplevel(0)
     avg_vol = avg_vol.replace(0, float("nan"))
     return vol / avg_vol
 

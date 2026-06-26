@@ -53,7 +53,7 @@ def neutralize_by_industry(
         logger.debug("有效样本不足(<10)，跳过行业中性化")
         return factor_values
 
-    y = factor_values[valid_mask].values.reshape(-1, 1)
+    y = factor_values[valid_mask].values
     dummies = pd.get_dummies(industry_labels[valid_mask], drop_first=True).astype(float)
     X = dummies.values
 
@@ -62,7 +62,7 @@ def neutralize_by_industry(
 
     model = LinearRegression()
     model.fit(X, y)
-    residuals = y.flatten() - model.predict(X)
+    residuals = y - model.predict(X)
 
     result = pd.Series(np.nan, index=factor_values.index)
     result[valid_mask[valid_mask].index] = residuals
@@ -93,13 +93,13 @@ def neutralize_by_market_cap(
         logger.debug("有效样本不足(<10)，跳过市值中性化")
         return factor_values
 
-    y = factor_values[valid_mask].values.reshape(-1, 1)
+    y = factor_values[valid_mask].values
     log_mcap = np.log(market_caps[valid_mask].astype(float))
     X = log_mcap.values.reshape(-1, 1)
 
     model = LinearRegression()
     model.fit(X, y)
-    residuals = y.flatten() - model.predict(X)
+    residuals = y - model.predict(X)
 
     result = pd.Series(np.nan, index=factor_values.index)
     result[valid_mask[valid_mask].index] = residuals
@@ -136,14 +136,14 @@ def neutralize_industry_mcap(
         logger.debug("有效样本不足(<10)，跳过行业+市值中性化")
         return factor_values
 
-    y = factor_values[valid_mask].values.reshape(-1, 1)
+    y = factor_values[valid_mask].values
     dummies = pd.get_dummies(industry_labels[valid_mask], drop_first=True).astype(float)
     log_mcap = np.log(market_caps[valid_mask].astype(float)).values.reshape(-1, 1)
     X = np.hstack([dummies.values, log_mcap])
 
     model = LinearRegression()
     model.fit(X, y)
-    residuals = y.flatten() - model.predict(X)
+    residuals = y - model.predict(X)
 
     result = pd.Series(np.nan, index=factor_values.index)
     result[valid_mask[valid_mask].index] = residuals

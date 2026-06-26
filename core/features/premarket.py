@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from core.features.sentiment import auction_open_premium, auction_volume_ratio
+
 # ADR 映射表路径
 _ADR_MAPPING_PATH = Path(__file__).resolve().parent.parent.parent / "configs" / "premarket" / "adr_mapping.yaml"
 

@@ -77,9 +77,9 @@ def dragon_tiger_net_buy(data: pd.DataFrame, params: dict) -> pd.Series:
 
     params: {}
     """
-    # 取最近一次龙虎榜数据
+    # ★ 取当日龙虎榜数据（不取"last"避免前视：each row uses its own date）
     if "net_amount" in data.columns:
-        net = data.groupby("code")["net_amount"].transform("last")
+        net = data["net_amount"]
     elif "dragon_tiger_net" in data.columns:
         net = data["dragon_tiger_net"]
     else:
@@ -124,7 +124,8 @@ def northbound_quarter_change(data: pd.DataFrame, params: dict) -> pd.Series:
     if "northbound_holdings" not in data.columns:
         return pd.Series(np.nan, index=data.index)
 
-    holdings = data["northbound_holdings"].fillna(method="ffill")
+    # ★ groupby ffill 防止跨 code 串号污染
+    holdings = data.groupby("code")["northbound_holdings"].ffill()
     change = holdings.groupby(data["code"]).pct_change(periods=1)
     # 标记为低频因子：非季度更新日返回 NaN
     # 通过检查 trade_date 是否为季度结束后的第5个交易日附近

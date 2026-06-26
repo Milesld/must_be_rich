@@ -39,19 +39,21 @@ def _pit_filter(
         )
         return financials
 
-    # 获取数据中的最大交易日（即"当前"回测时间点）
-    pit_date_raw = data["trade_date"].max()
-    # 统一转换为 date 类型，避免 Timestamp vs date 比较错误
-    if hasattr(pit_date_raw, "date"):
-        pit_date = pit_date_raw.date()
-    else:
-        pit_date = pit_date_raw
-
-    # 将 announce_date 也转换为 date 类型（防止 Timestamp 比较异常）
-    announce_col = financials["announce_date"].apply(
+    # ★ 数据通常包含单一 trade_date（因子按天调用），用 max 等价于该日
+    # 如有跨日数据也不误用：每行的 trade_date 是它自身的 PIT 截止点
+    # 统一转换为 date 类型
+    if "announce_date" not in financials.columns:
+        return financials
+    fin = financials.copy()
+    fin["_ann_dt"] = pd.to_datetime(fin["announce_date"]).apply(
         lambda x: x.date() if hasattr(x, "date") else x
     )
-    filtered = financials[announce_col <= pit_date].copy()
+    data_dates = pd.to_datetime(data["trade_date"]).apply(
+        lambda x: x.date() if hasattr(x, "date") else x
+    )
+    pit_date = data_dates.max()
+
+    filtered = fin[fin["_ann_dt"] <= pit_date].drop(columns=["_ann_dt"])
     skipped = len(financials) - len(filtered)
     if skipped > 0:
         logger.debug(
@@ -67,10 +69,23 @@ def _merge_financials(
 ) -> pd.DataFrame:
     """将财报数据按 code 合并到行情数据上，应用 PIT 过滤。"""
     fin = _pit_filter(data, financials, point_in_time)
-    # 使用 merge_asof 按日期对齐：对于每个行情日期，取最近披露的财报
-    # 要求 financials 有 code, announce_date, report_date 列
-    merged = data.merge(
-        fin, on="code", how="left", suffixes=("", "_fin")
+    if fin.empty:
+        # 无可合并的财报 — 返回 NaN 列
+        for col in financials.columns:
+            if col not in ("code", "announce_date", "report_date"):
+                data[col] = np.nan
+        return data
+    # ★ 用 merge_asof 对齐：对每行行情取最近一次已公告的财报，避免多对多行爆炸
+    # 前提：fin 需按 (code, announce_date) 排序
+    data = data.sort_values(["code", "trade_date"])
+    fin = fin.sort_values(["code", "announce_date"]) if "announce_date" in fin.columns else fin
+    merged = pd.merge_asof(
+        data, fin,
+        by="code",
+        left_on="trade_date",
+        right_on="announce_date" if "announce_date" in fin.columns else "report_date",
+        direction="backward",
+        suffixes=("", "_fin"),
     )
     return merged
 

@@ -333,7 +333,7 @@ def _fetch_sina(codes: list[str], start: date, end: date) -> pd.DataFrame | None
 
 
 def _fetch_eastmoney(codes: list[str], start: date, end: date) -> pd.DataFrame | None:
-    """从东方财富接口拉取（备用）。"""
+    """从东方财富接口拉取（备用）—— 提供 OHLCV + 换手率。"""
     import akshare as ak
 
     frames = []
@@ -350,9 +350,11 @@ def _fetch_eastmoney(codes: list[str], start: date, end: date) -> pd.DataFrame |
             df = raw.copy()
             df["code"] = code
             df["trade_date"] = pd.to_datetime(df["日期"]).dt.date
-            for col in ["开盘", "最高", "最低", "收盘", "成交量"]:
-                if col in df.columns:
-                    df[df.columns[df.columns.get_loc(col)]] = df[col].astype(float)
+            col_map = {"开盘": "open", "最高": "high", "最低": "low",
+                       "收盘": "close", "成交量": "volume", "换手率": "turnover"}
+            for cn, en in col_map.items():
+                if cn in df.columns:
+                    df[en] = df[cn].astype(float)
             frames.append(df)
         except Exception:
             continue
@@ -361,6 +363,35 @@ def _fetch_eastmoney(codes: list[str], start: date, end: date) -> pd.DataFrame |
         return None
     combined = pd.concat(frames, ignore_index=True)
     return combined.drop_duplicates(subset=["code", "trade_date"])
+
+
+def _supplement_turnover(raw_data: dict[date, dict], codes: list[str],
+                          start: date, end: date) -> None:
+    """从东方财富补充真实换手率数据，写入 raw_data 的 'turnover' 字段。"""
+    import akshare as ak
+    logger.info("正在补充换手率数据（东方财富）...")
+    count = 0
+    for code in codes:
+        try:
+            raw = ak.stock_zh_a_hist(
+                symbol=code, period="daily",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+                adjust="qfq",
+            )
+            if raw is None or len(raw) == 0:
+                continue
+            for _, row in raw.iterrows():
+                try:
+                    td_raw = pd.to_datetime(row["日期"]).date()
+                except Exception:
+                    continue
+                if td_raw in raw_data and code in raw_data[td_raw]:
+                    raw_data[td_raw][code]["turnover"] = float(row.get("换手率", 0) or 0)
+                    count += 1
+        except Exception:
+            continue
+    logger.info("换手率补充完成: %d 条", count)
 
 
 def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
@@ -425,7 +456,13 @@ def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
         close = float(row.get("close", 0))
         if close <= 0:
             continue
-        pre = float(row.get("pre_close", close * 0.99)) if "pre_close" in row else close * 0.99
+        # ★ 取东方财富的换手率（如有），否则留 0
+        turnover_val = float(row.get("turnover", 0) or 0)
+        pre_val = row.get("pre_close")
+        if pre_val is not None:
+            pre = float(pre_val)
+        else:
+            pre = close * 0.99  # 临时估算，后续 _fix_pre_close 会修正
 
         out.setdefault(td, {})[code] = {
             "open": float(row.get("open", close)),
@@ -435,9 +472,13 @@ def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
             "pre_close": max(pre, 0.01),
             "volume": float(row.get("volume", 0)),
             "amount": close * float(row.get("volume", 0)),
+            "turnover": turnover_val,
             "is_st": False,
             "is_suspended": False,
         }
+    # ★ 补充真实换手率（东方财富）并修正 pre_close
+    _supplement_turnover(out, codes, start, end)
+    _fix_pre_close(out)
     return out, "ok"
 
 
@@ -666,6 +707,22 @@ def _build_market_wide_from_pool(raw_data: dict[date, dict]) -> dict[date, dict[
     return out
 
 
+def _fix_pre_close(raw_data: dict[date, dict]) -> None:
+    """用上一交易日收盘价修正 pre_close（替代 close*0.99 的临时估算）。"""
+    # 对每只股票收集所有日期 → 排序 → 前一日的 close = 当日的 pre_close
+    code_dates: dict[str, list[tuple[date, float]]] = {}
+    for td, day_data in raw_data.items():
+        for code, fields in day_data.items():
+            code_dates.setdefault(code, []).append((td, fields.get("close", 0)))
+    for code, pairs in code_dates.items():
+        pairs.sort(key=lambda x: x[0])
+        for i in range(1, len(pairs)):
+            td = pairs[i][0]
+            prev_close = pairs[i-1][1]
+            if prev_close > 0 and td in raw_data and code in raw_data[td]:
+                raw_data[td][code]["pre_close"] = prev_close
+
+
 # ══════════════════════════════════════════════════════════════
 # 4. 因子计算
 # ══════════════════════════════════════════════════════════════
@@ -715,6 +772,7 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
         high_hist: dict[str, list[float]] = {}
         low_hist: dict[str, list[float]] = {}
         open_hist: dict[str, list[float]] = {}
+        turnover_hist: dict[str, list[float]] = {}
         date_list: list[date] = []
 
         for dt in lookback_dates:
@@ -728,9 +786,10 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
                     high_hist.setdefault(code, []).append(fields.get("high", close))
                     low_hist.setdefault(code, []).append(fields.get("low", close))
                     open_hist.setdefault(code, []).append(fields.get("open", close))
+                    turnover_hist.setdefault(code, []).append(fields.get("turnover", 0))
 
         # ★ get_prev_n_trading_days 返回 [最新→最旧]，反转使 arr[0]=最旧, arr[-1]=最新
-        for h in [price_hist, vol_hist, amount_hist, high_hist, low_hist, open_hist]:
+        for h in [price_hist, vol_hist, amount_hist, high_hist, low_hist, open_hist, turnover_hist]:
             for code in h:
                 h[code].reverse()
 
@@ -761,6 +820,7 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
                         financials.get(code, {}) if financials else {},
                         today_overseas,
                         today_market,
+                        turnover_hist.get(code, []),
                     )
                     row[name] = float(val) if val is not None and not np.isnan(val) else 0.0
                 except Exception:
@@ -834,6 +894,7 @@ def _compute_factor_value(
     financials: dict[str, float] | None = None,
     overseas: dict[str, float] | None = None,
     market_wide: dict[str, float] | None = None,
+    turnover_vals: list | None = None,
 ) -> float | None:
     """在内存数据上直接计算因子值（不走 core/features 的完整实现，
     因为后者依赖 FeatureStore 和特定的 DataFrame 格式）。"""
@@ -892,9 +953,10 @@ def _compute_factor_value(
                     w = int(name.split("_")[-1].replace("d", ""))
                 except ValueError:
                     pass
-            if len(vols) >= w:
-                denom = arr[-w:] if len(arr) >= w else arr
-                return float(vols[-w:].mean() / denom.mean()) if denom.mean() > 0 else 0.0
+            # ★ 使用东方财富真实换手率（百分比，如 3.5 = 3.5%）
+            to_vals = turnover_vals or []
+            if len(to_vals) >= w:
+                return float(np.mean(to_vals[-w:]))
             return 0.0
 
         if name == "volume_ratio":
@@ -935,7 +997,12 @@ def _compute_factor_value(
             w = params.get("window", 20)
             if len(rets) < 2 or len(amounts) < 2:
                 return 0.0
-            illiq = np.abs(rets[-w:]) / np.maximum(np.array(amounts[-w:], dtype=float), 1e-8)
+            # ★ rets 比 amounts 少1个元素（rets[i] 是从 day i 到 i+1 的收益）
+            # 对齐：amounts 从 index 1 开始（收益日当天的成交额）
+            amt_aligned = np.array(amounts[1:], dtype=float)
+            n_ret = len(rets)
+            w_align = min(w, n_ret, len(amt_aligned))
+            illiq = np.abs(rets[-w_align:]) / np.maximum(amt_aligned[-w_align:], 1e-8)
             return float(illiq.mean() * 1e8)
 
         # ── NLP 情绪因子 ───

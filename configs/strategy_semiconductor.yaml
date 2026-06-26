@@ -1,11 +1,13 @@
 # ══════════════════════════════════════════════════════════
-# Optimizer #3 (TPE全区间搜索, 夏普1.47, 2023-01~2025-12, 数组方向+lookback已修复)
+# 策略配置 — semiconductor 细分池
+# 仅主板+创业板，无科创板/北交所
+# Optimizer #4 (TPE全区间搜索, 夏普2.00, 等权重置+turneover真实+pre_close修正)
 # ══════════════════════════════════════════════════════════
 
 backtest:
-  start_date: "2026-01-01"
-  end_date: "2026-06-24"
+  end_date: '2026-06-24'
   initial_capital: 200000
+  start_date: '2026-01-01'
 
 data_source:
   provider: sina
@@ -58,72 +60,62 @@ factor_max_weight:
   alpha_momentum_20d: 0.25
 
 # ══════════════════════════════════════════════════════════
-# 8因子组合：双动量主导 + 量价辅助
+# 5因子组合：振幅+换手主导，等权重置版本
 # ══════════════════════════════════════════════════════════
 factors:
-  momentum_60d:
+  amplitude_20d:
     enabled: true
     weight: 0.4
     module: core.features.technical
-    function: momentum
-    params: {window: 60}
-    description: "60日累计收益率 — 半导体中期趋势核心信号"
-
-  momentum_20d:
-    enabled: true
-    weight: 0.393
-    module: core.features.technical
-    function: momentum
+    function: amplitude
     params: {window: 20}
-    description: "20日累计收益率 — 短期趋势"
-
-  bollinger_position:
-    enabled: true
-    weight: 0.044
-    module: core.features.technical
-    function: bollinger_position
-    params: {num_std: 2, window: 20}
-    description: "布林带位置 — 均值回归辅助"
-
-  rsi_14:
-    enabled: true
-    weight: 0.038
-    module: core.features.technical
-    function: rsi
-    params: {window: 14}
-    description: "14日RSI — 超卖反转"
-
-  turnover_5d:
-    enabled: true
-    weight: 0.034
-    module: core.features.technical
-    function: turnover
-    params: {window: 5}
-    description: "5日换手率 — 短期热度"
+    description: "20日平均振幅 — 反转项，等权重置后成为最稳定的核心信号"
 
   turnover_20d:
     enabled: true
-    weight: 0.034
+    weight: 0.301
     module: core.features.technical
     function: turnover
     params: {window: 20}
-    description: "20日换手率 — 中期参与度"
+    description: "20日真实换手率 — 基于东方财富数据"
+
+  momentum_60d:
+    enabled: true
+    weight: 0.128
+    module: core.features.technical
+    function: momentum
+    params: {window: 60}
+    description: "60日累计收益率 — 中期趋势"
 
   volume_ratio:
     enabled: true
-    weight: 0.032
+    weight: 0.123
     module: core.features.technical
     function: volume_ratio
     params: {window: 20}
-    description: "量比 — 放量确认"
+    description: "量比 — 放量突破确认"
+
+  rsi_14:
+    enabled: true
+    weight: 0.048
+    module: core.features.technical
+    function: rsi
+    params: {window: 14}
+    description: "14日RSI — 小权重多元化"
+
+  momentum_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: momentum
+    params: {window: 20}
 
   alpha_momentum_20d:
-    enabled: true
-    weight: 0.026
+    enabled: false
+    weight: 0.0
     module: core.features.technical
     function: alpha_momentum
     params: {window: 20}
-    description: "剔除市场beta后的纯alpha动量 — 补足"
 
   volatility_20d:
     enabled: false
@@ -132,19 +124,19 @@ factors:
     function: volatility
     params: {window: 20}
 
-  amplitude_20d:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: amplitude
-    params: {window: 20}
-
   atr_14:
     enabled: false
     weight: 0.0
     module: core.features.technical
     function: atr
     params: {window: 14}
+
+  turnover_5d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: turnover
+    params: {window: 5}
 
   amihud_illiq:
     enabled: false
@@ -159,6 +151,13 @@ factors:
     module: core.features.technical
     function: macd_dif
     params: {fast: 12, signal: 9, slow: 26}
+
+  bollinger_position:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: bollinger_position
+    params: {num_std: 2, window: 20}
 
   ma_alignment:
     enabled: false
