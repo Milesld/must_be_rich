@@ -407,6 +407,10 @@ def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
         )
     start = _parse_date(config["backtest"]["start_date"]) - timedelta(days=lookback)
     end = _parse_date(config["backtest"]["end_date"])
+    # ★ 如果配置了 validate_end 且在 end_date 之后，延长数据拉取覆盖验证期
+    bt_cfg = config.get("backtest", {})
+    if bt_cfg.get("validate_end") and _parse_date(bt_cfg["validate_end"]) > end:
+        end = _parse_date(bt_cfg["validate_end"])
     codes = _get_codes(config)
     provider = config.get("data_source", {}).get("provider", "sina")
 
@@ -1160,8 +1164,14 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
     config = load_config(config_path)
     cfg_bt = config["backtest"]
 
-    start_date = _parse_date(cfg_bt["start_date"])
-    end_date = _parse_date(cfg_bt["end_date"])
+    # ★ 如果配置了 validate_start/validate_end，回测优先使用验证区间
+    # 否则回退到 start_date/end_date（也用作 optimizer 训练窗口）
+    if "validate_start" in cfg_bt and "validate_end" in cfg_bt:
+        start_date = _parse_date(cfg_bt["validate_start"])
+        end_date = _parse_date(cfg_bt["validate_end"])
+    else:
+        start_date = _parse_date(cfg_bt["start_date"])
+        end_date = _parse_date(cfg_bt["end_date"])
     initial_capital = cfg_bt["initial_capital"]
 
     # ── 打印当前配置 ──
@@ -1176,8 +1186,13 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
         logger.info("  %s (权重=%.2f) %s", f["name"], f.get("weight", 0), direction)
 
     # ── 数据加载 ──
+    # ★ 告诉 _load_real_data 回测实际起点（而非 optimizer 训练起点），避免拉无用历史数据
+    orig_backtest = dict(config["backtest"])
+    config["backtest"]["start_date"] = str(start_date)
+    config["backtest"]["end_date"] = str(end_date)
     logger.info("正在加载数据...")
     raw_data, source_label = _load_real_data(config)
+    config["backtest"] = orig_backtest  # 恢复原始配置
 
     if not raw_data or len(raw_data) < 100:
         logger.error("=" * 60)

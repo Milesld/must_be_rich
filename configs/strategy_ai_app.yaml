@@ -1,13 +1,15 @@
 # ══════════════════════════════════════════════════════════
-# 策略配置 — ai/app 细分池
+# 策略配置 — AI应用/软件/大模型/数据要素 细分池
 # 仅主板+创业板，无科创板/北交所
-# Optimizer #3 (TPE全区间搜索, 夏普1.34, 等权重置+turneover真实+pre_close修正)
+# Optimizer #5 (时间加权夏普, halflife=2.0年, 夏普1.33)
 # ══════════════════════════════════════════════════════════
 
 backtest:
-  end_date: '2026-06-24'
+  end_date: '2025-12-31'
   initial_capital: 200000
-  start_date: '2026-01-01'
+  start_date: '2023-01-01'
+  validate_end: '2026-06-25'
+  validate_start: '2026-01-01'
 
 data_source:
   provider: sina
@@ -47,33 +49,68 @@ regime:
   max_position_ratio: 0.9
   min_position_ratio: 0.2
 
+optimizer:
+  time_decay_halflife: 2.0
+
 # ══════════════════════════════════════════════════════════
-# 3因子组合：ATR+换手+板块相对强度
+# 7因子组合：振幅+双换手+布林回归，halflife=2.0适配
 # ══════════════════════════════════════════════════════════
 factors:
-  atr_14:
-    enabled: true
-    weight: 0.439
-    module: core.features.technical
-    function: atr
-    params: {window: 14}
-    description: "14日ATR — 波动过滤，反转项"
-
-  turnover_5d:
+  amplitude_20d:
     enabled: true
     weight: 0.4
     module: core.features.technical
+    function: amplitude
+    params: {window: 20}
+    description: "20日振幅 — 反转项，AI软件池最核心信号"
+
+  turnover_20d:
+    enabled: true
+    weight: 0.157
+    module: core.features.technical
+    function: turnover
+    params: {window: 20}
+    description: "20日真实换手率 — 中期活跃度"
+
+  turnover_5d:
+    enabled: true
+    weight: 0.121
+    module: core.features.technical
     function: turnover
     params: {window: 5}
-    description: "5日真实换手率 — AI软件股的活跃度核心"
+    description: "5日真实换手率 — 短期热度"
 
-  sector_relative_strength_20d:
+  bollinger_position:
     enabled: true
-    weight: 0.161
+    weight: 0.115
     module: core.features.technical
-    function: sector_relative_strength
+    function: bollinger_position
+    params: {num_std: 2, window: 20}
+    description: "布林带位置 — 均值回归"
+
+  volatility_20d:
+    enabled: true
+    weight: 0.107
+    module: core.features.technical
+    function: volatility
     params: {window: 20}
-    description: "板块内相对强度 — 同类里挑最强的"
+    description: "20日波动率 — 反转项，低波更稳"
+
+  momentum_60d:
+    enabled: true
+    weight: 0.062
+    module: core.features.technical
+    function: momentum
+    params: {window: 60}
+    description: "60日动量 — 中期趋势"
+
+  macd_dif:
+    enabled: true
+    weight: 0.038
+    module: core.features.technical
+    function: macd_dif
+    params: {fast: 12, signal: 9, slow: 26}
+    description: "MACD快慢线差值 — 趋势辅助"
 
   momentum_20d:
     enabled: false
@@ -82,13 +119,6 @@ factors:
     function: momentum
     params: {window: 20}
 
-  momentum_60d:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: momentum
-    params: {window: 60}
-
   alpha_momentum_20d:
     enabled: false
     weight: 0.0
@@ -96,26 +126,12 @@ factors:
     function: alpha_momentum
     params: {window: 20}
 
-  volatility_20d:
+  atr_14:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: volatility
-    params: {window: 20}
-
-  amplitude_20d:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: amplitude
-    params: {window: 20}
-
-  turnover_20d:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: turnover
-    params: {window: 20}
+    function: atr
+    params: {window: 14}
 
   volume_ratio:
     enabled: false
@@ -138,24 +154,17 @@ factors:
     function: rsi
     params: {window: 14}
 
-  macd_dif:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: macd_dif
-    params: {fast: 12, signal: 9, slow: 26}
-
-  bollinger_position:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: bollinger_position
-    params: {num_std: 2, window: 20}
-
   ma_alignment:
     enabled: false
     weight: 0.0
     module: core.features.technical
     function: ma_alignment
     params: {long: 60, mid: 20, short: 5}
+
+  sector_relative_strength_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: sector_relative_strength
+    params: {window: 20}
 

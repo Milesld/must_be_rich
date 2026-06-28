@@ -1,13 +1,15 @@
 # ══════════════════════════════════════════════════════════
 # 策略配置 — apple/chain 细分池
 # 仅主板+创业板，无科创板/北交所
-# Optimizer #3 (TPE全区间搜索, 夏普1.99, 等权重置+turneover真实+pre_close修正)
+# Optimizer #4 (时间加权夏普, halflife=1.0年, 夏普1.95)
 # ══════════════════════════════════════════════════════════
 
 backtest:
-  end_date: '2026-06-24'
+  end_date: '2025-12-31'
+  validate_start: "2026-01-01"   # 回测验证区间起点（optimizer 忽略此字段）
+  validate_end: "2026-06-25"     # 回测验证区间终点
   initial_capital: 200000
-  start_date: '2026-01-01'
+  start_date: '2023-01-01'
 
 data_source:
   provider: sina
@@ -48,64 +50,68 @@ regime:
   max_position_ratio: 0.9
   min_position_ratio: 0.2
 
+optimizer:
+  time_decay_halflife: 2.0 #1.0
+
 # ══════════════════════════════════════════════════════════
-# 6因子组合：短期换手+ATR波动双主力
+# 7因子组合：低波动+均线排列+量比，时间衰减适配
 # ══════════════════════════════════════════════════════════
 factors:
-  turnover_5d:
+  volatility_20d:
     enabled: true
-    weight: 0.4
+    weight: 0.367
     module: core.features.technical
-    function: turnover
-    params: {window: 5}
-    description: "5日真实换手率 — 苹果链最核心的短期热度信号"
-
-  atr_14:
-    enabled: true
-    weight: 0.354
-    module: core.features.technical
-    function: atr
-    params: {window: 14}
-    description: "14日ATR — 波幅约束（反转项）"
-
-  momentum_20d:
-    enabled: true
-    weight: 0.083
-    module: core.features.technical
-    function: momentum
+    function: volatility
     params: {window: 20}
-    description: "20日累计收益率 — 短期趋势"
-
-  bollinger_position:
-    enabled: true
-    weight: 0.069
-    module: core.features.technical
-    function: bollinger_position
-    params: {num_std: 2, window: 20}
-    description: "布林带位置 — 均值回归辅助"
+    description: "20日波动率 — 反转项，苹果链低波动=订单稳"
 
   ma_alignment:
     enabled: true
-    weight: 0.061
+    weight: 0.24
     module: core.features.technical
     function: ma_alignment
     params: {long: 60, mid: 20, short: 5}
-    description: "均线多空排列 — 趋势辅助"
+    description: "均线多空排列 — 趋势强度"
 
   volume_ratio:
     enabled: true
-    weight: 0.033
+    weight: 0.172
     module: core.features.technical
     function: volume_ratio
     params: {window: 20}
-    description: "量比 — 微量补足"
+    description: "量比 — 放量突破确认"
 
   momentum_60d:
-    enabled: false
-    weight: 0.0
+    enabled: true
+    weight: 0.167
     module: core.features.technical
     function: momentum
     params: {window: 60}
+    description: "60日动量 — 中期趋势"
+
+  momentum_20d:
+    enabled: true
+    weight: 0.024
+    module: core.features.technical
+    function: momentum
+    params: {window: 20}
+    description: "20日动量 — 短期趋势补足"
+
+  amihud_illiq:
+    enabled: true
+    weight: 0.016
+    module: core.features.technical
+    function: amihud_illiq
+    params: {window: 20}
+    description: "非流动性 — 轻量约束"
+
+  amplitude_20d:
+    enabled: true
+    weight: 0.013
+    module: core.features.technical
+    function: amplitude
+    params: {window: 20}
+    description: "20日振幅 — 微量补足"
 
   alpha_momentum_20d:
     enabled: false
@@ -114,32 +120,25 @@ factors:
     function: alpha_momentum
     params: {window: 20}
 
-  volatility_20d:
+  atr_14:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: volatility
-    params: {window: 20}
+    function: atr
+    params: {window: 14}
 
-  amplitude_20d:
+  turnover_5d:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: amplitude
-    params: {window: 20}
+    function: turnover
+    params: {window: 5}
 
   turnover_20d:
     enabled: false
     weight: 0.0
     module: core.features.technical
     function: turnover
-    params: {window: 20}
-
-  amihud_illiq:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: amihud_illiq
     params: {window: 20}
 
   rsi_14:
@@ -155,6 +154,13 @@ factors:
     module: core.features.technical
     function: macd_dif
     params: {fast: 12, signal: 9, slow: 26}
+
+  bollinger_position:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: bollinger_position
+    params: {num_std: 2, window: 20}
 
   sector_relative_strength_20d:
     enabled: false

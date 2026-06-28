@@ -1,13 +1,15 @@
 # ══════════════════════════════════════════════════════════
 # 策略配置 — robotics 细分池
 # 仅主板+创业板，无科创板/北交所
-# Optimizer #4 (TPE全区间搜索, 夏普1.90, 等权重置+turneover真实+pre_close修正)
+# Optimizer #5 (时间加权夏普, halflife=1.0年, 夏普1.42)
 # ══════════════════════════════════════════════════════════
 
 backtest:
-  end_date: '2026-06-24'
+  end_date: '2025-12-31'
+  validate_start: "2026-01-01"   # 回测验证区间起点（optimizer 忽略此字段）
+  validate_end: "2026-06-25"     # 回测验证区间终点
   initial_capital: 200000
-  start_date: '2026-01-01'
+  start_date: '2023-01-01'
 
 data_source:
   provider: sina
@@ -47,41 +49,52 @@ regime:
   max_position_ratio: 0.9
   min_position_ratio: 0.2
 
+optimizer:
+  time_decay_halflife: 1.5 #1.0
+
 # ══════════════════════════════════════════════════════════
-# 4因子组合：MACD+量比双引擎
+# 5因子组合：换手+均线+动量，时间衰减适配
 # ══════════════════════════════════════════════════════════
 factors:
-  macd_dif:
-    enabled: true
-    weight: 0.417
-    module: core.features.technical
-    function: macd_dif
-    params: {fast: 12, signal: 9, slow: 26}
-    description: "MACD快慢线差值 — 趋势强度核心信号"
-
-  volume_ratio:
+  turnover_20d:
     enabled: true
     weight: 0.4
     module: core.features.technical
-    function: volume_ratio
+    function: turnover
     params: {window: 20}
-    description: "量比 — 放量确认资金共识"
+    description: "20日真实换手率 — 机器人池核心信号"
 
-  alpha_momentum_20d:
+  ma_alignment:
     enabled: true
-    weight: 0.107
+    weight: 0.258
     module: core.features.technical
-    function: alpha_momentum
-    params: {window: 20}
-    description: "剔除市场beta后的纯alpha动量 — 辅助"
+    function: ma_alignment
+    params: {long: 60, mid: 20, short: 5}
+    description: "均线多空排列 — 趋势强度信号"
 
-  sector_relative_strength_20d:
+  momentum_60d:
     enabled: true
-    weight: 0.075
+    weight: 0.215
     module: core.features.technical
-    function: sector_relative_strength
+    function: momentum
+    params: {window: 60}
+    description: "60日动量 — 中期趋势方向"
+
+  volatility_20d:
+    enabled: true
+    weight: 0.102
+    module: core.features.technical
+    function: volatility
     params: {window: 20}
-    description: "板块内相对强度 — 辅助"
+    description: "20日波动率 — 反转项"
+
+  turnover_5d:
+    enabled: true
+    weight: 0.025
+    module: core.features.technical
+    function: turnover
+    params: {window: 5}
+    description: "5日换手率 — 短期热度补足"
 
   momentum_20d:
     enabled: false
@@ -90,18 +103,11 @@ factors:
     function: momentum
     params: {window: 20}
 
-  momentum_60d:
+  alpha_momentum_20d:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: momentum
-    params: {window: 60}
-
-  volatility_20d:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: volatility
+    function: alpha_momentum
     params: {window: 20}
 
   amplitude_20d:
@@ -118,18 +124,11 @@ factors:
     function: atr
     params: {window: 14}
 
-  turnover_5d:
+  volume_ratio:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: turnover
-    params: {window: 5}
-
-  turnover_20d:
-    enabled: false
-    weight: 0.0
-    module: core.features.technical
-    function: turnover
+    function: volume_ratio
     params: {window: 20}
 
   amihud_illiq:
@@ -146,6 +145,13 @@ factors:
     function: rsi
     params: {window: 14}
 
+  macd_dif:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_dif
+    params: {fast: 12, signal: 9, slow: 26}
+
   bollinger_position:
     enabled: false
     weight: 0.0
@@ -153,10 +159,10 @@ factors:
     function: bollinger_position
     params: {num_std: 2, window: 20}
 
-  ma_alignment:
+  sector_relative_strength_20d:
     enabled: false
     weight: 0.0
     module: core.features.technical
-    function: ma_alignment
-    params: {long: 60, mid: 20, short: 5}
+    function: sector_relative_strength
+    params: {window: 20}
 

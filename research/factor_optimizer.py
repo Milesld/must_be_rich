@@ -12,6 +12,11 @@
     --search-years 1     仅用最近1年数据搜索（快2-4倍），找到后全区间验证
     --search-years 0.5   仅用最近半年搜索（最快），Top-3 自动全区间验证
 
+时间衰减加权:
+    在 strategy_xxx.yaml 中配置 optimizer.time_decay_halflife（年），
+    如 1.0 表示一年前的交易日权重为今天的 50%。值越小越偏好近期。
+    不配置则使用传统等权夏普（向后兼容）。
+
 引擎:
     - optuna 已安装 → TPE 自适应搜索
     - optuna 未安装 → 随机搜索（狄利克雷权重分配）
@@ -146,14 +151,78 @@ def _parse_date(s: str) -> date:
 _backtest_cache: dict[str, dict] = {}
 
 
-def _cache_key(enabled: list[str], weights: dict[str, float], config_sig: str) -> str:
-    # 缓存键包含因子名和权重（四舍五入到3位小数，避免浮点噪音）
+def _cache_key(enabled: list[str], weights: dict[str, float], config_sig: str,
+               halflife: float | None = None) -> str:
+    # 缓存键包含因子名、权重和半衰期
     weight_str = "|".join(f"{n}={weights.get(n,0):.3f}" for n in sorted(enabled))
-    return config_sig + "|" + weight_str
+    hl_str = f"|hl={halflife:.2f}" if halflife else ""
+    return config_sig + "|" + weight_str + hl_str
 
 
-def run_single_backtest(config: dict, label: str = "") -> dict | None:
-    """用给定配置跑一次回测，返回指标字典。结果基于 config 签名缓存。"""
+def _compute_time_weighted_sharpe(daily_returns: "pd.Series", end_date: date,
+                                  halflife_years: float) -> float:
+    """计算时间衰减加权夏普比率（EWMA 思想扩展到夏普）。
+
+    近期的收益率赋更高权重，远期赋更低权重。
+    权重 = exp(-ln(2) × days_from_end / half_life_days)
+
+    Args:
+        daily_returns: 日收益率 Series，index 为 date（从回测 daily_nav 获取）。
+        end_date: 回测结束日期（权重从这一天往回衰减）。
+        halflife_years: 半衰期（年）。1.0 表示 252 个交易日前的权重 = 今天的一半。
+
+    Returns:
+        时间加权年化夏普比率。
+    """
+    import math
+
+    daily_returns = daily_returns.dropna()
+    if len(daily_returns) < 20:
+        return 0.0
+
+    half_life_days = halflife_years * 252
+
+    # 计算每个交易日距结束日的自然日距离
+    weights = []
+    for d in daily_returns.index:
+        td = d if isinstance(d, date) else (d.date() if hasattr(d, "date") else d)
+        if isinstance(td, str):
+            td = date.fromisoformat(td)
+        days = (end_date - td).days
+        # 权重衰减：半衰期内权重减半
+        w = math.exp(-math.log(2) * max(days, 0) / half_life_days)
+        weights.append(w)
+    weights_arr = np.array(weights, dtype=float)
+
+    if weights_arr.sum() < 1e-10:
+        return 0.0
+
+    rets = daily_returns.values.astype(float)
+
+    # 加权日均收益
+    weighted_mean_ret = np.average(rets, weights=weights_arr)
+    # 加权日均波动率
+    weighted_var = np.average((rets - weighted_mean_ret) ** 2, weights=weights_arr)
+
+    ann_ret = weighted_mean_ret * 252
+    ann_vol = np.sqrt(weighted_var * 252) if weighted_var > 0 else 0.0
+    if ann_vol <= 0:
+        return 0.0
+    return float((ann_ret - 0.02) / ann_vol)
+
+
+def run_single_backtest(config: dict, label: str = "",
+                       halflife_years: float | None = None) -> dict | None:
+    """用给定配置跑一次回测，返回指标字典。结果基于 config 签名缓存。
+
+    Args:
+        config: 策略配置字典。
+        label: 标签（用于日志，可选）。
+        halflife_years: 时间衰减半衰期（年）。None = 传统等权夏普。
+
+    Returns:
+        指标字典，其中 sharpe_ratio 已根据 halflife_years 计算（如果设置）。
+    """
     from research.run_backtest_demo import (
         ConfigDrivenStrategy, _build_feature_loader,
         _load_real_data, _load_financials, _get_codes,
@@ -165,7 +234,7 @@ def run_single_backtest(config: dict, label: str = "") -> dict | None:
     weights = {n: config["factors"][n].get("weight", 0) for n in enabled}
     bt = config["backtest"]
     sig = f"{bt['start_date']}|{bt['end_date']}|{bt['initial_capital']}"
-    ck = _cache_key(enabled, weights, sig)
+    ck = _cache_key(enabled, weights, sig, halflife_years)
     if ck in _backtest_cache:
         return _backtest_cache[ck]
 
@@ -196,6 +265,16 @@ def run_single_backtest(config: dict, label: str = "") -> dict | None:
     result = engine.run(strategy, data_loader=data_loader, feature_loader=feature_loader)
     metrics = result.summary()
     if metrics and "error" not in metrics:
+        # ★ 时间衰减加权夏普：从 daily_nav 取日收益序列，按 halflife 衰减
+        if halflife_years and halflife_years > 0:
+            nav_df = result.daily_nav
+            if not nav_df.empty and "daily_return" in nav_df.columns:
+                tw_sharpe = _compute_time_weighted_sharpe(
+                    nav_df["daily_return"], end_date, halflife_years,
+                )
+                metrics["sharpe_ratio"] = tw_sharpe
+                metrics["time_weighted_sharpe"] = True
+                metrics["halflife_years"] = halflife_years
         _backtest_cache[ck] = metrics
     return metrics
 
@@ -211,6 +290,7 @@ def optimize_optuna(
     min_factors: int = 2,
     max_factors: int = 10,
     factor_max_weight: dict[str, float] | None = None,
+    halflife_years: float | None = None,
 ) -> list[dict] | None:
     try:
         import optuna
@@ -280,7 +360,7 @@ def optimize_optuna(
             cfg["factors"][name]["enabled"] = True
             cfg["factors"][name]["weight"] = float(w)
 
-        metrics = run_single_backtest(cfg)
+        metrics = run_single_backtest(cfg, halflife_years=halflife_years)
         if metrics is None or "error" in metrics:
             return -999.0
 
@@ -336,7 +416,7 @@ def optimize_optuna(
     results: list[dict] = []
     # 基线
     enabled_baseline = [n for n, c in all_factors.items() if c.get("enabled")]
-    baseline = run_single_backtest(base_config, label="基线")
+    baseline = run_single_backtest(base_config, label="基线", halflife_years=halflife_years)
     if baseline:
         results.append({
             "label": f"基线 ({len(enabled_baseline)}因子)",
@@ -382,13 +462,14 @@ def optimize_random(
     n_rounds: int = 200,
     min_factors: int = 2,
     max_factors: int = 10,
+    halflife_years: float | None = None,
 ) -> list[dict]:
     all_factors = base_config.get("factors", {})
     rng = np.random.default_rng(42)
     results: list[dict] = []
 
     enabled_baseline = [n for n, c in all_factors.items() if c.get("enabled")]
-    baseline = run_single_backtest(base_config, label="基线")
+    baseline = run_single_backtest(base_config, label="基线", halflife_years=halflife_years)
     if baseline:
         results.append({
             "label": f"基线 ({len(enabled_baseline)}因子)",
@@ -411,7 +492,7 @@ def optimize_random(
             cfg["factors"][name]["enabled"] = True
             cfg["factors"][name]["weight"] = float(w)
 
-        metrics = run_single_backtest(cfg)
+        metrics = run_single_backtest(cfg, halflife_years=halflife_years)
         if metrics is None:
             continue
 
@@ -455,7 +536,8 @@ def _verify_top_on_full_window(
     original_bt = load_config(config_path)["backtest"]
     full_config["backtest"] = original_bt
 
-    full_metrics = run_single_backtest(full_config, label="全区间验证")
+    hl = full_config.get("optimizer", {}).get("time_decay_halflife", None)
+    full_metrics = run_single_backtest(full_config, label="全区间验证", halflife_years=hl)
     return full_metrics
 
 
@@ -483,6 +565,10 @@ def optimize(
     """
     base_config = load_config(config_path)
     all_factors = base_config.get("factors", {})
+
+    # 从 YAML 读取时间衰减半衰期（可选，未配置则使用传统等权夏普）
+    optimizer_cfg = base_config.get("optimizer", {}) if isinstance(base_config.get("optimizer"), dict) else {}
+    halflife_years = optimizer_cfg.get("time_decay_halflife", None)
 
     # 从 YAML 读取单因子权重上限（可选，未配置则使用 optimizer 内置默认值）
     factor_max_weight = base_config.get("factor_max_weight", None)
@@ -522,8 +608,9 @@ def optimize(
     else:
         search_label = "全区间搜索"
 
+    hl_label = f" | 半衰期 {halflife_years}年" if halflife_years else ""
     print(f"\n{'='*60}")
-    print(f"因子组合优化器 — {search_label}")
+    print(f"因子组合优化器 — {search_label}{hl_label}")
     print(f"  任务: {label}")
     print(f"  候选池: {len(candidates)} 个（已排除无数据源因子）")
     print(f"  搜索: {rounds} 轮, 因子 {min_factors}~{max_factors} 个")
@@ -531,20 +618,21 @@ def optimize(
     print(f"{'='*60}")
 
     # 跑基线
-    baseline = run_single_backtest(base_config, label="基线")
+    baseline = run_single_backtest(base_config, label="基线", halflife_years=halflife_years)
     if baseline is None:
         print("数据加载失败！请确认网络正常。")
         return []
     print(f"  基线夏普: {baseline.get('sharpe_ratio', 0):.3f}")
 
     # 搜索
-    optuna_results = optimize_optuna(base_config, candidates, rounds, min_factors, max_factors, factor_max_weight)
+    optuna_results = optimize_optuna(base_config, candidates, rounds, min_factors, max_factors,
+                                     factor_max_weight, halflife_years)
     if optuna_results is not None:
         print("  ✓ 使用 Optuna TPE 引擎")
         results = optuna_results
     else:
         print("  ⚠ Optuna 未安装，回退到随机搜索")
-        results = optimize_random(base_config, candidates, rounds, min_factors, max_factors)
+        results = optimize_random(base_config, candidates, rounds, min_factors, max_factors, halflife_years)
 
     # 如果是短窗口搜索，对 Top-3 做全区间验证
     if search_years and search_years > 0 and len(results) > 1:
