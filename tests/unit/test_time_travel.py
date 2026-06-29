@@ -9,6 +9,9 @@ from datetime import date
 
 import pytest
 
+# core.features 链路依赖 sklearn（neutralizer）；环境缺 sklearn 时整体跳过。
+pytest.importorskip("sklearn", reason="sklearn 未安装（core.features.neutralizer 依赖）")
+
 from core.features.time_travel_checker import (
     TimeTravelChecker,
     TimeTravelError,

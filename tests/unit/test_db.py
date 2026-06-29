@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import pytest
 
+# core.data.db 在某次重构中被移除；模块缺失时整体跳过本文件。
+pytest.importorskip("core.data.db", reason="core.data.db 模块缺失")
+
 
 class TestClickHouseClient:
     """ClickHouse 客户端测试。"""

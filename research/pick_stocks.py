@@ -21,9 +21,9 @@ logger = logging.getLogger("picker")
 
 from research.run_backtest_demo import (
     load_config, _enabled_factors, _get_codes,
-    _load_real_data, _load_financials, _load_overseas_data,
+    _load_real_data, _load_overseas_data,
     _build_market_wide_from_pool, _build_feature_loader,
-    ConfigDrivenStrategy,
+    _build_monthly_universe, ConfigDrivenStrategy,
 )
 
 
@@ -48,12 +48,16 @@ def pick_stocks(config_path: str, show_n: int, buy_n: int, budget: float) -> lis
         return []
 
     codes = _get_codes(config)
-    financials = _load_financials(codes)
+    # 不加载基本面数据：基本面因子已被优化器 ALL_NO_DATA 过滤，且 ROE 为伪造值
+    financials: dict = {}
     start_date = date.fromisoformat(config["backtest"]["start_date"])
     overseas_data = _load_overseas_data(start_date, date.today())
     market_wide_data = _build_market_wide_from_pool(raw_data)
+    # 动态股票池（fixed 模式返回空 dict）
+    monthly_universe = _build_monthly_universe(raw_data, config)
     feature_loader = _build_feature_loader(raw_data, config, financials,
-                                           overseas_data, market_wide_data)
+                                           overseas_data, market_wide_data,
+                                           monthly_universe=monthly_universe)
 
     # ── 找最近有数据的交易日 ──
     from core.common.calendar import get_calendar
@@ -74,7 +78,16 @@ def pick_stocks(config_path: str, show_n: int, buy_n: int, budget: float) -> lis
         print("  ✗ 因子计算为空")
         return []
 
-    strategy = ConfigDrivenStrategy(config, raw_data)
+    strategy = ConfigDrivenStrategy(config, raw_data, monthly_universe=monthly_universe)
+    # 选股与回测一致：dynamic 模式下只在当月候选宇宙内打分
+    from research.run_backtest_demo import _universe_for_date
+    universe = _universe_for_date(monthly_universe, last_td)
+    if universe is not None:
+        in_uni = [c for c in features.index if c in set(universe)]
+        features = features.loc[in_uni]
+        if features.empty:
+            print("  ✗ 当月宇宙内无可打分标的")
+            return []
     scores = strategy._score_stocks(features)
     top = scores.nlargest(show_n)
 

@@ -3,6 +3,9 @@
 import pytest
 from datetime import date
 
+# TimeTravelChecker 经 core.features.__init__ 间接依赖 sklearn；缺失时整体跳过。
+pytest.importorskip("sklearn", reason="sklearn 未安装（core.features.neutralizer 依赖）")
+
 
 def test_catches_future_announce_date() -> None:
     """财报 announce_date 晚于回测日期 → 应被检查器捕获。"""

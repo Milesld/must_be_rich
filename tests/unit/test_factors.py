@@ -17,6 +17,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+# 因子计算链路依赖 sklearn（core.features.neutralizer）；缺失时整体跳过。
+pytest.importorskip("sklearn", reason="sklearn 未安装（core.features.neutralizer 依赖）")
+
 
 @pytest.fixture
 def daily_data() -> pd.DataFrame:

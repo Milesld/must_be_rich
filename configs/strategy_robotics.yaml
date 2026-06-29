@@ -14,6 +14,19 @@ backtest:
 data_source:
   provider: sina
   lookback_days: 400
+  # ── 动态股票池（PIT 候选宇宙）──
+  # mode: dynamic 时忽略下方 codes，改为每月初从行业成分按 PIT 规则筛选。
+  # ★ 残留偏差：akshare 行业成分是"当前"成分，回放历史仍有轻度幸存者偏差。
+  universe:
+    mode: dynamic                 # dynamic | fixed（缺省 fixed 用 codes）
+    industries:                   # akshare 行业板块名，用 stock_board_industry_name_em() 核对
+      - "通用设备"
+      - "专用设备"
+      - "汽车零部件"
+    pool_size: 30                 # 每月候选宇宙上限（按日均成交额取 top）
+    min_listing_months: 12        # 上市满 12 个月（剔除次新）
+    min_avg_amount: 200000000     # 过去 60 日均成交额 ≥ 2 亿（流动性）
+  # fixed 模式回退用的固定列表（dynamic 模式下不生效，保留供对比）
   codes:
     - "603728"
     - "300024"
@@ -48,9 +61,27 @@ regime:
   enabled: true
   max_position_ratio: 0.9
   min_position_ratio: 0.2
+  params:
+    # 趋势/波动来自真实宽基指数（沪深300），不再是池内伪指数。
+    # valuation 维度暂无数据源（恒中性 0.5），权重归零，原 0.05 并入 trend。
+    dimension_weights:
+      trend: 0.30
+      volatility: 0.25
+      breadth: 0.15
+      overseas: 0.30
+      valuation: 0.00
 
 optimizer:
   time_decay_halflife: 1.5 #1.0
+  # ── Walk-Forward 样本外评分（防过拟合）──
+  # true：优化目标 = mean(各样本外段夏普) − wf_lambda·std。开启后自动关闭
+  #       "高夏普惩罚"（std 项已天然防过拟合）。计算量 ×窗口数，需配合数据只加载一次。
+  use_walk_forward: true #false       # 缺省 false 保持旧行为，可对比
+  wf_lambda: 0.5                # std 惩罚系数
+  wf_train_years: 2             # 训练窗口（年）
+  wf_test_months: 3            # 每段样本外窗口（月）= 前滚步长
+  wf_purge_days: 5             # 训练/测试间清除期（交易日）
+  wf_min_train_years: 1        # 最小训练窗口（年）
 
 # ══════════════════════════════════════════════════════════
 # 5因子组合：换手+均线+动量，时间衰减适配

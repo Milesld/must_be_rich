@@ -222,6 +222,10 @@ class BacktestEngine:
         self.trades: list[TradeRecord] = []
         self.daily_snapshots: list[DailySnapshot] = []
         self.peak_nav: float = initial_capital
+        # 现金不足时假定追加注资的累计额（见 _apply_fill）
+        self.total_injected: float = 0.0
+        # 基准每日收盘 {date: close}（沪深300）；由调用方注入，用于相对超额指标
+        self.benchmark_close: dict[date, float] = {}
 
         # 回测可复现性
         self._run_id: str = f"bt_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -339,6 +343,8 @@ class BacktestEngine:
             initial_capital=self.initial_capital,
             daily_snapshots=self.daily_snapshots,
             trades=self.trades,
+            total_injected=self.total_injected,
+            benchmark_close=self.benchmark_close,
         )
 
     # ── 单笔交易处理 ────────────────────────
@@ -442,6 +448,16 @@ class BacktestEngine:
         amount = record.filled_price * record.filled_shares
 
         if record.side == "buy":
+            # 现金充足性检查：不足时提醒并假定追加注资，再继续买入
+            need = amount + total_cost
+            if self.cash < need:
+                gap = need - self.cash
+                logger.warning(
+                    "[%s] 现金不足：%s 需 ¥%.0f，可用 ¥%.0f，缺口 ¥%.0f。已假定追加注资继续买入。",
+                    record.trade_date, record.code, need, self.cash, gap,
+                )
+                self.cash += gap
+                self.total_injected += gap
             # 扣除现金（成交金额 + 佣金 + 过户费，印花税仅在卖方）
             self.cash -= (amount + total_cost)
             # 更新持仓
@@ -602,6 +618,8 @@ class BacktestResult:
         initial_capital: float,
         daily_snapshots: list[DailySnapshot],
         trades: list[TradeRecord],
+        total_injected: float = 0.0,
+        benchmark_close: dict[date, float] | None = None,
     ) -> None:
         self.run_id = run_id
         self.start_date = start_date
@@ -609,6 +627,9 @@ class BacktestResult:
         self.initial_capital = initial_capital
         self.daily_snapshots = daily_snapshots
         self.trades = trades
+        self.total_injected = total_injected
+        # 基准（沪深300）每日收盘 {date: close}，用于相对超额收益/信息比率
+        self.benchmark_close = benchmark_close or {}
 
     # ── DataFrame 导出 ──────────────────────
 
@@ -685,7 +706,12 @@ class BacktestResult:
             float(t.cost_breakdown.total) for t in filled_trades if t.cost_breakdown
         )
 
-        return {
+        # ── 相对基准（沪深300）超额指标 ──
+        # 绝对夏普会把"跟跌"误判为失败、把"普涨里跑输"误判为成功。
+        # 用基准对齐策略每日收益，算超额年化、信息比率、超额最大回撤。
+        bench_metrics = self._benchmark_relative_metrics(nav_series, return_series)
+
+        result = {
             "run_id": self.run_id,
             "period": f"{self.start_date} ~ {self.end_date}",
             "n_trading_days": n_days,
@@ -707,4 +733,64 @@ class BacktestResult:
             "total_realized_pnl": float(total_realized_pnl),
             "total_cost": float(total_cost),
             "total_cost_pct": float(total_cost / self.initial_capital) if self.initial_capital > 0 else 0.0,
+            # 现金不足时假定追加注资的累计额；effective_capital = 初始 + 追加。
+            # 收益率指标仍按 initial_capital 计，effective 口径供参考。
+            "total_injected": float(self.total_injected),
+            "effective_capital": float(self.initial_capital + self.total_injected),
+        }
+        result.update(bench_metrics)
+        return result
+
+    def _benchmark_relative_metrics(self, nav_series, return_series) -> dict:
+        """计算相对基准（沪深300）的超额指标。
+
+        Returns（基准缺失时返回空 dict，summary 不含这些键）:
+            benchmark_total_return / benchmark_annual_return
+            excess_annual_return（年化超额）
+            information_ratio（信息比率 = 年化超额 / 年化跟踪误差）
+            excess_max_drawdown（超额净值曲线的最大回撤）
+        """
+        if not self.benchmark_close or nav_series.empty:
+            return {}
+        # 按策略 NAV 的交易日对齐基准收盘
+        dates = list(nav_series.index)
+        bench = []
+        for d in dates:
+            dd = d.date() if hasattr(d, "date") else d
+            bench.append(self.benchmark_close.get(dd))
+        # 基准覆盖不足则跳过
+        valid = [b for b in bench if b is not None and b > 0]
+        if len(valid) < max(20, int(len(dates) * 0.8)):
+            return {}
+        import pandas as _pd
+        bench_s = _pd.Series(bench, index=nav_series.index).ffill().bfill()
+
+        n_days = len(nav_series)
+        years = n_days / 252 if n_days > 0 else 0.0
+        bench_total = float(bench_s.iloc[-1] / bench_s.iloc[0] - 1)
+        bench_annual = (1 + bench_total) ** (1 / years) - 1 if years > 0 else 0.0
+        strat_total = float(nav_series.iloc[-1] / nav_series.iloc[0] - 1)
+        strat_annual = (1 + strat_total) ** (1 / years) - 1 if years > 0 else 0.0
+
+        # 日超额收益 → 信息比率
+        bench_ret = bench_s.pct_change().dropna()
+        aligned = return_series.reindex(bench_ret.index).dropna()
+        common = aligned.index.intersection(bench_ret.index)
+        excess_daily = (aligned.loc[common] - bench_ret.loc[common]).dropna()
+        if len(excess_daily) > 1 and excess_daily.std() > 0:
+            ir = float(excess_daily.mean() * 252 / (excess_daily.std() * (252 ** 0.5)))
+        else:
+            ir = 0.0
+
+        # 超额净值曲线（策略/基准的相对强弱）最大回撤
+        rel = (nav_series / nav_series.iloc[0]) / (bench_s / bench_s.iloc[0])
+        rel_peak = rel.expanding().max()
+        excess_dd = float(((rel - rel_peak) / rel_peak).min())
+
+        return {
+            "benchmark_total_return": bench_total,
+            "benchmark_annual_return": float(bench_annual),
+            "excess_annual_return": float(strat_annual - bench_annual),
+            "information_ratio": ir,
+            "excess_max_drawdown": excess_dd,
         }

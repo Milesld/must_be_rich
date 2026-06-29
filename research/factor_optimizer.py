@@ -211,22 +211,59 @@ def _compute_time_weighted_sharpe(daily_returns: "pd.Series", end_date: date,
     return float((ann_ret - 0.02) / ann_vol)
 
 
+def _load_shared_data(config: dict) -> dict | None:
+    """整轮优化只调用一次：加载与因子组合无关的所有数据。
+
+    价格、海外指数、全市场情绪、宽基指数、动态宇宙都只取决于股票池和日期，
+    与"选了哪些因子"无关。把它们提到优化循环外只加载一次，避免每个候选
+    因子组合都重复联网拉取（之前 100 轮 = 最多 100 次全量网络加载）。
+
+    注意：不加载基本面数据（_load_financials）——其输出（ROE/营收增速等）
+    全部在 ALL_NO_DATA 中被过滤，且 ROE 是伪造值，加载纯属浪费。
+
+    Returns:
+        {raw_data, overseas_data, market_wide_data, benchmark_index, monthly_universe}
+        或 None（数据加载失败）。
+    """
+    from research.run_backtest_demo import (
+        _load_real_data, _load_overseas_data, _build_market_wide_from_pool,
+        _load_benchmark_index, _build_monthly_universe,
+    )
+
+    bt = config["backtest"]
+    start_date = _parse_date(bt["start_date"])
+    end_date = _parse_date(bt["end_date"])
+
+    raw_data, _label = _load_real_data(config)
+    if not raw_data or len(raw_data) < 100:
+        return None
+
+    return {
+        "raw_data": raw_data,
+        "overseas_data": _load_overseas_data(start_date, end_date),
+        "market_wide_data": _build_market_wide_from_pool(raw_data),
+        "benchmark_index": _load_benchmark_index(start_date, end_date),
+        "monthly_universe": _build_monthly_universe(raw_data, config),
+    }
+
+
 def run_single_backtest(config: dict, label: str = "",
-                       halflife_years: float | None = None) -> dict | None:
+                       halflife_years: float | None = None,
+                       shared_data: dict | None = None) -> dict | None:
     """用给定配置跑一次回测，返回指标字典。结果基于 config 签名缓存。
 
     Args:
         config: 策略配置字典。
         label: 标签（用于日志，可选）。
         halflife_years: 时间衰减半衰期（年）。None = 传统等权夏普。
+        shared_data: 由 _load_shared_data 预加载的共享数据包。为 None 时
+                     回退到自行加载（向后兼容，仅用于独立调用场景）。
 
     Returns:
         指标字典，其中 sharpe_ratio 已根据 halflife_years 计算（如果设置）。
     """
     from research.run_backtest_demo import (
         ConfigDrivenStrategy, _build_feature_loader,
-        _load_real_data, _load_financials, _get_codes,
-        _load_overseas_data, _build_market_wide_from_pool,
     )
     from core.backtest.engine import BacktestEngine
 
@@ -241,9 +278,17 @@ def run_single_backtest(config: dict, label: str = "",
     start_date = _parse_date(bt["start_date"])
     end_date = _parse_date(bt["end_date"])
 
-    raw_data, _label = _load_real_data(config)
-    if not raw_data or len(raw_data) < 100:
-        return None
+    # 共享数据缺省时回退到自行加载（独立调用场景）
+    if shared_data is None:
+        shared_data = _load_shared_data(config)
+        if shared_data is None:
+            return None
+
+    raw_data = shared_data["raw_data"]
+    overseas_data = shared_data["overseas_data"]
+    market_wide_data = shared_data["market_wide_data"]
+    benchmark_index = shared_data.get("benchmark_index")
+    monthly_universe = shared_data.get("monthly_universe")
 
     import pandas as pd
 
@@ -251,17 +296,24 @@ def run_single_backtest(config: dict, label: str = "",
         rows = [{"code": code, **fields} for code, fields in raw_data.get(trade_date, {}).items()]
         return pd.DataFrame(rows) if rows else pd.DataFrame()
 
-    codes = _get_codes(config)
-    financials = _load_financials(codes) if codes else {}
-    overseas_data = _load_overseas_data(start_date, end_date)
-    market_wide_data = _build_market_wide_from_pool(raw_data)
-    feature_loader = _build_feature_loader(raw_data, config, financials,
-                                           overseas_data, market_wide_data)
-    strategy = ConfigDrivenStrategy(config, raw_data, overseas_data)
+    # 不加载基本面数据：所有基本面因子已被 ALL_NO_DATA 过滤，financials 传空
+    feature_loader = _build_feature_loader(raw_data, config, {},
+                                           overseas_data, market_wide_data,
+                                           monthly_universe=monthly_universe)
+    strategy = ConfigDrivenStrategy(config, raw_data, overseas_data,
+                                    benchmark_index=benchmark_index,
+                                    monthly_universe=monthly_universe)
     engine = BacktestEngine(
         start_date=start_date, end_date=end_date,
         initial_capital=bt["initial_capital"],
     )
+    # 注入沪深300日收盘做相对超额基准
+    if benchmark_index and "csi300" in benchmark_index:
+        _bdf = benchmark_index["csi300"]
+        engine.benchmark_close = {
+            (d.date() if hasattr(d, "date") else d): float(c)
+            for d, c in _bdf["close"].items()
+        }
     result = engine.run(strategy, data_loader=data_loader, feature_loader=feature_loader)
     metrics = result.summary()
     if metrics and "error" not in metrics:
@@ -280,6 +332,78 @@ def run_single_backtest(config: dict, label: str = "",
 
 
 # ══════════════════════════════════════════════════════════════
+# Walk-Forward 样本外评分
+# ══════════════════════════════════════════════════════════════
+
+def _walk_forward_score(
+    cfg: dict,
+    shared_data: dict,
+    halflife_years: float | None,
+    wf_lambda: float = 0.5,
+) -> dict | None:
+    """对一个因子组合做 Walk-Forward 样本外评分。
+
+    用样本外稳定性替代"在训练集上调参再惩罚高夏普"的治标手段：
+    复用 core.backtest.walk_forward 的滚动窗口，对每段 test 窗口跑回测，
+    取各段样本外夏普 S_i，目标值 = mean(S_i) − λ·std(S_i)。
+
+    因子组合+权重已固定（即"训练产物"），所以每段只需在 test 区间跑一次回测，
+    无需再训练模型。std 项惩罚"只有某几期爆发、其余拉胯"的不稳定组合，
+    天然防过拟合，不再需要人为压制高夏普。
+
+    Returns:
+        {"score": 目标值, "wf_sharpes": [S_i...], "wf_periods": ["test起~止"...],
+         "wf_mean": mean, "wf_std": std}，无有效窗口时返回 None。
+    """
+    import copy as _copy
+
+    from core.backtest.walk_forward import WalkForwardValidator
+
+    bt = cfg["backtest"]
+    full_start = _parse_date(bt["start_date"])
+    full_end = _parse_date(bt["end_date"])
+
+    wf_cfg = cfg.get("optimizer", {}) if isinstance(cfg.get("optimizer"), dict) else {}
+    validator = WalkForwardValidator(
+        train_window_years=wf_cfg.get("wf_train_years", 2),
+        test_window_months=wf_cfg.get("wf_test_months", 3),
+        purge_days=wf_cfg.get("wf_purge_days", 5),
+        min_train_years=wf_cfg.get("wf_min_train_years", 1),
+    )
+    windows = validator.get_windows(full_start, full_end)
+    if not windows:
+        return None
+
+    sharpes: list[float] = []
+    periods: list[str] = []
+    for (_train_s, _train_e, test_s, test_e) in windows:
+        # 在 test 区间上跑回测：因子组合固定，只改回测窗口
+        seg_cfg = _copy.deepcopy(cfg)
+        seg_cfg["backtest"]["start_date"] = str(test_s)
+        seg_cfg["backtest"]["end_date"] = str(test_e)
+        m = run_single_backtest(seg_cfg, halflife_years=halflife_years,
+                                shared_data=shared_data)
+        if m is None or "error" in m:
+            continue
+        sharpes.append(float(m.get("sharpe_ratio", 0.0)))
+        periods.append(f"{test_s}~{test_e}")
+
+    if len(sharpes) < 2:
+        return None
+
+    arr = np.array(sharpes, dtype=float)
+    mean_s = float(arr.mean())
+    std_s = float(arr.std())
+    return {
+        "score": mean_s - wf_lambda * std_s,
+        "wf_sharpes": sharpes,
+        "wf_periods": periods,
+        "wf_mean": mean_s,
+        "wf_std": std_s,
+    }
+
+
+# ══════════════════════════════════════════════════════════════
 # 引擎: Optuna TPE
 # ══════════════════════════════════════════════════════════════
 
@@ -291,6 +415,7 @@ def optimize_optuna(
     max_factors: int = 10,
     factor_max_weight: dict[str, float] | None = None,
     halflife_years: float | None = None,
+    shared_data: dict | None = None,
 ) -> list[dict] | None:
     try:
         import optuna
@@ -298,6 +423,9 @@ def optimize_optuna(
         return None
 
     all_factors = base_config.get("factors", {})
+    opt_cfg = base_config.get("optimizer", {}) if isinstance(base_config.get("optimizer"), dict) else {}
+    use_wf = bool(opt_cfg.get("use_walk_forward", False))
+    wf_lambda = float(opt_cfg.get("wf_lambda", 0.5))
 
     def objective(trial: optuna.Trial) -> float:
         selected: list[str] = []
@@ -360,7 +488,7 @@ def optimize_optuna(
             cfg["factors"][name]["enabled"] = True
             cfg["factors"][name]["weight"] = float(w)
 
-        metrics = run_single_backtest(cfg, halflife_years=halflife_years)
+        metrics = run_single_backtest(cfg, halflife_years=halflife_years, shared_data=shared_data)
         if metrics is None or "error" in metrics:
             return -999.0
 
@@ -379,13 +507,34 @@ def optimize_optuna(
         mdd = abs(float(metrics.get("max_drawdown", 0)))
         total_trades = int(metrics.get("total_trades", 0))
         n_trading_days = int(metrics.get("n_trading_days", 0))
+        # 全区间真实夏普（无论 WF 与否都记录，供报告显示，避免把"目标分"当夏普）
+        trial.set_user_attr("full_sharpe", sharpe)
+
+        # ── 目标信号 ──
+        # use_walk_forward=True：用样本外夏普均值 − λ·标准差，天然防过拟合，
+        #   不再需要人为压制高夏普（std 项已惩罚不稳定的爆发型组合）。
+        # use_walk_forward=False：沿用旧的"单区间夏普 − 高夏普惩罚"（向后兼容）。
+        if use_wf:
+            wf = _walk_forward_score(cfg, shared_data, halflife_years, wf_lambda)
+            if wf is None:
+                return -999.0
+            objective_signal = wf["score"]
+            trial.set_user_attr("wf_sharpes", "|".join(f"{s:.2f}" for s in wf["wf_sharpes"]))
+            trial.set_user_attr("wf_periods", "|".join(wf["wf_periods"]))
+            trial.set_user_attr("wf_mean", float(wf["wf_mean"]))
+            trial.set_user_attr("wf_std", float(wf["wf_std"]))
+        else:
+            objective_signal = sharpe
+
         penalty = 0.0
         if mdd > 0.25:
             penalty += (mdd - 0.25) * 5.0
-        if sharpe > 2.0:
-            penalty += (sharpe - 2.0) * 3.0  # 加严：>2.0开始罚分
-        if sharpe > 3.0:
-            penalty += (sharpe - 3.0) * 5.0  # >3.0叠加重罚
+        if not use_wf:
+            # 仅旧模式需要人为压制高夏普；WF 模式由 std 项天然防过拟合
+            if sharpe > 2.0:
+                penalty += (sharpe - 2.0) * 3.0
+            if sharpe > 3.0:
+                penalty += (sharpe - 3.0) * 5.0
         # 低交易量惩罚：交易太少 ≈ buy-and-hold 运气的概率高
         if n_trading_days > 0:
             avg_trades_per_month = total_trades / (n_trading_days / 21)
@@ -395,7 +544,7 @@ def optimize_optuna(
         amihud_w = weights_float[selected.index("amihud_illiq")] if "amihud_illiq" in selected else 0.0
         if amihud_w > 0.15:
             penalty += (amihud_w - 0.15) * 10.0
-        return sharpe - penalty
+        return objective_signal - penalty
 
     print(f"\n[Optuna TPE] {n_trials} 轮, 因子 {min_factors}~{max_factors} 个")
 
@@ -416,7 +565,8 @@ def optimize_optuna(
     results: list[dict] = []
     # 基线
     enabled_baseline = [n for n, c in all_factors.items() if c.get("enabled")]
-    baseline = run_single_backtest(base_config, label="基线", halflife_years=halflife_years)
+    baseline = run_single_backtest(base_config, label="基线", halflife_years=halflife_years,
+                                   shared_data=shared_data)
     if baseline:
         results.append({
             "label": f"基线 ({len(enabled_baseline)}因子)",
@@ -428,7 +578,11 @@ def optimize_optuna(
         [t for t in study.trials if t.value is not None and t.value > -900],
         key=lambda t: t.value, reverse=True,
     )
-    for rank, t in enumerate(trials[:30]):
+    # 去重：TPE 常收敛到同一组合反复采样。按(因子集合, 权重四舍五入)去重，
+    # 只保留每个独特组合得分最高的一个，避免结果表 30 行几乎相同。
+    seen_combos: set[tuple] = set()
+    rank = 0
+    for t in trials:
         factors = t.user_attrs.get("factors", "").split("|") if t.user_attrs.get("factors") else []
         weights_str = t.user_attrs.get("weights", "")
         weights = {}
@@ -437,17 +591,36 @@ def optimize_optuna(
                 if "=" in pair:
                     n, w = pair.split("=")
                     weights[n] = float(w)
-        results.append({
-            "label": f"Optuna #{rank+1} ({len(factors)}因子)",
+        # 组合指纹：因子名 + 权重保留2位小数
+        combo_key = tuple(sorted((n, round(w, 2)) for n, w in weights.items()))
+        if combo_key in seen_combos:
+            continue
+        seen_combos.add(combo_key)
+        rank += 1
+        if rank > 30:
+            break
+        # 全区间真实夏普（与优化目标分区分开）。WF 模式下 t.value 是
+        # mean(样本外夏普)−λ·std 的"目标分"，不是真夏普，单列展示。
+        full_sharpe = float(t.user_attrs.get("full_sharpe", t.value))
+        entry = {
+            "label": f"Optuna #{rank} ({len(factors)}因子)",
             "factors": factors,
             "weights": weights,
-            "sharpe_ratio": float(t.value),
+            "objective_score": float(t.value),   # 优化目标分（WF: mean−λstd）
+            "sharpe_ratio": full_sharpe,          # 全区间真实夏普
             "annual_return": float(t.user_attrs.get("annual_return", 0)),
             "max_drawdown": float(t.user_attrs.get("max_drawdown", 0)),
             "win_rate": t.user_attrs.get("win_rate", "N/A"),
             "total_trades": int(t.user_attrs.get("total_trades", 0)),
             "n_trading_days": int(t.user_attrs.get("n_trading_days", 0)),
-        })
+        }
+        # Walk-Forward 子窗口诊断明细（use_walk_forward 时可用）
+        if t.user_attrs.get("wf_sharpes"):
+            entry["wf_sharpes"] = t.user_attrs["wf_sharpes"]
+            entry["wf_periods"] = t.user_attrs.get("wf_periods", "")
+            entry["wf_mean"] = float(t.user_attrs.get("wf_mean", 0))
+            entry["wf_std"] = float(t.user_attrs.get("wf_std", 0))
+        results.append(entry)
 
     return results
 
@@ -463,13 +636,15 @@ def optimize_random(
     min_factors: int = 2,
     max_factors: int = 10,
     halflife_years: float | None = None,
+    shared_data: dict | None = None,
 ) -> list[dict]:
     all_factors = base_config.get("factors", {})
     rng = np.random.default_rng(42)
     results: list[dict] = []
 
     enabled_baseline = [n for n, c in all_factors.items() if c.get("enabled")]
-    baseline = run_single_backtest(base_config, label="基线", halflife_years=halflife_years)
+    baseline = run_single_backtest(base_config, label="基线", halflife_years=halflife_years,
+                                    shared_data=shared_data)
     if baseline:
         results.append({
             "label": f"基线 ({len(enabled_baseline)}因子)",
@@ -492,7 +667,7 @@ def optimize_random(
             cfg["factors"][name]["enabled"] = True
             cfg["factors"][name]["weight"] = float(w)
 
-        metrics = run_single_backtest(cfg, halflife_years=halflife_years)
+        metrics = run_single_backtest(cfg, halflife_years=halflife_years, shared_data=shared_data)
         if metrics is None:
             continue
 
@@ -617,8 +792,16 @@ def optimize(
     print(f"  区间: {base_config['backtest']['start_date']} ~ {base_config['backtest']['end_date']}")
     print(f"{'='*60}")
 
+    # ★ 整轮优化只加载一次数据（价格/海外/宽基/宇宙与因子组合无关）
+    #   注意：必须在上面调整 start_date（短窗口搜索）之后加载，确保区间一致
+    shared_data = _load_shared_data(base_config)
+    if shared_data is None:
+        print("数据加载失败！请确认网络正常。")
+        return []
+
     # 跑基线
-    baseline = run_single_backtest(base_config, label="基线", halflife_years=halflife_years)
+    baseline = run_single_backtest(base_config, label="基线", halflife_years=halflife_years,
+                                   shared_data=shared_data)
     if baseline is None:
         print("数据加载失败！请确认网络正常。")
         return []
@@ -626,13 +809,14 @@ def optimize(
 
     # 搜索
     optuna_results = optimize_optuna(base_config, candidates, rounds, min_factors, max_factors,
-                                     factor_max_weight, halflife_years)
+                                     factor_max_weight, halflife_years, shared_data=shared_data)
     if optuna_results is not None:
         print("  ✓ 使用 Optuna TPE 引擎")
         results = optuna_results
     else:
         print("  ⚠ Optuna 未安装，回退到随机搜索")
-        results = optimize_random(base_config, candidates, rounds, min_factors, max_factors, halflife_years)
+        results = optimize_random(base_config, candidates, rounds, min_factors, max_factors,
+                                  halflife_years, shared_data=shared_data)
 
     # 如果是短窗口搜索，对 Top-3 做全区间验证
     if search_years and search_years > 0 and len(results) > 1:
@@ -667,16 +851,29 @@ def print_report(results: list[dict]) -> None:
     best = results[1] if len(results) > 1 else baseline
     improved = [r for r in results[1:]
                 if r.get("sharpe_ratio", -99) > baseline.get("sharpe_ratio", -99)]
+    # 是否 WF 模式（结果带 wf_mean）→ 决定排序/展示口径
+    is_wf = any("wf_mean" in r for r in results[1:])
 
     print(f"\n{'='*100}")
     print(f"优化结果")
     print(f"{'='*100}")
-    print(f"  基线夏普: {baseline.get('sharpe_ratio',0):.3f}"
-          f"  |  最佳夏普: {best.get('sharpe_ratio',0):.3f}"
-          f"  |  优于基线: {len(improved)}/{len(results)-1 if len(results)>1 else 0}")
+    if is_wf:
+        print(f"  ⚠ Walk-Forward 模式：排序按'目标分(mean−λ·std)'，'夏普'列为全区间真实夏普。")
+        print(f"  基线夏普: {baseline.get('sharpe_ratio',0):.3f}"
+              f"  |  最佳全区间夏普: {best.get('sharpe_ratio',0):.3f}"
+              f"  |  最佳目标分: {best.get('objective_score',0):.3f}"
+              f"  |  全区间优于基线: {len(improved)}/{len(results)-1 if len(results)>1 else 0}")
+    else:
+        print(f"  基线夏普: {baseline.get('sharpe_ratio',0):.3f}"
+              f"  |  最佳夏普: {best.get('sharpe_ratio',0):.3f}"
+              f"  |  优于基线: {len(improved)}/{len(results)-1 if len(results)>1 else 0}")
     print(f"{'='*100}")
-    print(f"  {'排':<3s} {'标签':<28s} {'夏普':>7s} {'年化':>7s} {'回撤':>7s} {'胜率':>7s} {'交易':>5s} {'组合':<s}")
-    print(f"  {'─'*3} {'─'*28} {'─'*7} {'─'*7} {'─'*7} {'─'*7} {'─'*5} {'─'*30}")
+    if is_wf:
+        print(f"  {'排':<3s} {'标签':<26s} {'目标分':>7s} {'WF均值':>7s} {'WFstd':>6s} {'真夏普':>7s} {'年化':>7s} {'回撤':>7s} {'组合':<s}")
+        print(f"  {'─'*3} {'─'*26} {'─'*7} {'─'*7} {'─'*6} {'─'*7} {'─'*7} {'─'*7} {'─'*30}")
+    else:
+        print(f"  {'排':<3s} {'标签':<28s} {'夏普':>7s} {'年化':>7s} {'回撤':>7s} {'胜率':>7s} {'交易':>5s} {'组合':<s}")
+        print(f"  {'─'*3} {'─'*28} {'─'*7} {'─'*7} {'─'*7} {'─'*7} {'─'*5} {'─'*30}")
 
     for rank, r in enumerate(results[:20]):
         sharpe = r.get("sharpe_ratio", 0)
@@ -704,11 +901,19 @@ def print_report(results: list[dict]) -> None:
         if len(factors) > 5:
             factor_str += f" ...共{len(factors)}个"
 
-        print(
-            f"  {rank+1:<3d} {r['label']:<28s} "
-            f"{sharpe:7.3f} {ann_ret*100:6.1f}% {mdd*100:6.1f}% {wr_str:>7s} {trades:>5d} "
-            f"{factor_str}"
-        )
+        if is_wf:
+            print(
+                f"  {rank+1:<3d} {r['label']:<26s} "
+                f"{r.get('objective_score',0):7.3f} {r.get('wf_mean',0):7.2f} {r.get('wf_std',0):6.2f} "
+                f"{sharpe:7.3f} {ann_ret*100:6.1f}% {mdd*100:6.1f}% "
+                f"{factor_str}"
+            )
+        else:
+            print(
+                f"  {rank+1:<3d} {r['label']:<28s} "
+                f"{sharpe:7.3f} {ann_ret*100:6.1f}% {mdd*100:6.1f}% {wr_str:>7s} {trades:>5d} "
+                f"{factor_str}"
+            )
 
     # 过拟合诊断
     if len(results) > 1:
@@ -729,6 +934,23 @@ def print_report(results: list[dict]) -> None:
             checks.append("✓ 未检测到明显过拟合信号")
         for c in checks:
             print(f"  {c}")
+
+    # ── Walk-Forward 子窗口夏普诊断（use_walk_forward 时可用）──
+    wf_results = [r for r in results[1:6] if r.get("wf_sharpes")]
+    if wf_results:
+        print(f"\n{'─'*100}")
+        print("Walk-Forward 子窗口夏普（各样本外段，std 高=不稳定 ⚑）:")
+        for rank, r in enumerate(wf_results):
+            sharpes = [float(x) for x in r["wf_sharpes"].split("|") if x]
+            periods = r.get("wf_periods", "").split("|")
+            mean_s = r.get("wf_mean", 0.0)
+            std_s = r.get("wf_std", 0.0)
+            flag = " ⚑红旗(波动大)" if std_s > 0.8 else ""
+            seg_str = " | ".join(
+                f"{p.split('~')[0]}={s:.2f}" for p, s in zip(periods, sharpes)
+            )
+            print(f"  #{rank+1}: mean={mean_s:.2f} std={std_s:.2f}{flag}")
+            print(f"       {seg_str}")
 
     # Top-3 权重
     top3 = [r for r in results[1:4] if r.get("weights")]

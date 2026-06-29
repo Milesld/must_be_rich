@@ -67,7 +67,10 @@ class TestMarketRegime:
 
         d = MarketRegimeDetector()
         r = d.detect(date(2026, 6, 7), df)
-        assert set(r.dimension_scores.keys()) == {"trend", "volatility", "valuation", "breadth"}
+        # regime 含 5 个维度（trend/volatility/valuation/breadth/overseas）
+        assert set(r.dimension_scores.keys()) == {
+            "trend", "volatility", "valuation", "breadth", "overseas",
+        }
         for v in r.dimension_scores.values():
             assert 0.0 <= v <= 1.0
 

@@ -33,6 +33,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("demo")
 
+# 行业成分股缓存：dynamic 模式下按 industries 签名缓存，避免一次回测内重复联网
+_INDUSTRY_UNIVERSE_CACHE: dict[tuple, list[str]] = {}
+
+# 数据拉取进程池并发数。并行跑多个池时（见 scripts/run_optimizers.sh），
+# 用环境变量 FETCH_WORKERS 调小，避免 N池×workers 把数据源打爆/限流。
+import os as _os
+_FETCH_WORKERS = int(_os.environ.get("FETCH_WORKERS", "8"))
+
 
 # ══════════════════════════════════════════════════════════════
 # 1. 配置加载
@@ -72,7 +80,9 @@ class ConfigDrivenStrategy:
         return name in self.INVERSE_EXACT or name.startswith(self.INVERSE_PREFIXES)
 
     def __init__(self, config: dict, raw_data: dict | None = None,
-                 overseas_data: dict | None = None) -> None:
+                 overseas_data: dict | None = None,
+                 benchmark_index: dict | None = None,
+                 monthly_universe: dict | None = None) -> None:
         cfg = config.get("strategy", {})
         self.top_n = cfg.get("top_n", 5)
         self.rebalance_freq = cfg.get("rebalance_frequency", "monthly")
@@ -86,6 +96,8 @@ class ConfigDrivenStrategy:
         if not self.factors:
             logger.warning("配置中没有启用的因子！")
         self._last_rebalance_period: Any = None
+        # 动态股票池：每月宇宙 {anchor_date: [codes]}；fixed 模式为空
+        self._monthly_universe = monthly_universe or {}
 
         # ── 市场状态判断 ──
         regime_cfg = config.get("regime", {})
@@ -98,6 +110,7 @@ class ConfigDrivenStrategy:
             self._regime_emergency_threshold = regime_cfg.get("emergency_threshold", 0.50)
             self._raw_data = raw_data
             self._overseas_data = overseas_data or {}
+            self._benchmark_index = benchmark_index  # 真实宽基指数（沪深300日线）
             logger.info("市场状态判断已启用 (仓位范围: %.0f%%~%.0f%%)",
                         self._regime_min_position * 100, self._regime_max_position * 100)
         else:
@@ -106,6 +119,7 @@ class ConfigDrivenStrategy:
             self._regime_max_position = 1.0
             self._raw_data = None
             self._overseas_data = {}
+            self._benchmark_index = None
 
         # 跟踪当前实际仓位（用于判断是否需要减仓）
         self._current_regime: Any = None
@@ -163,7 +177,17 @@ class ConfigDrivenStrategy:
         if features.empty:
             return intents
 
-        scores = self._score_stocks(features)
+        # ── 动态股票池：调仓日只在当月候选宇宙内打分选股 ──
+        universe = _universe_for_date(self._monthly_universe, trade_date)
+        scoring_features = features
+        if universe is not None:
+            in_uni = [c for c in features.index if c in set(universe)]
+            scoring_features = features.loc[in_uni]
+            if scoring_features.empty:
+                logger.warning("调仓日 %s 当月宇宙内无可打分标的，跳过", trade_date)
+                return intents
+
+        scores = self._score_stocks(scoring_features)
         if scores.empty:
             return intents
 
@@ -226,7 +250,21 @@ class ConfigDrivenStrategy:
         return intents
 
     def _build_market_proxy(self, as_of_date: date) -> pd.DataFrame | None:
-        """从 raw_data 构建等权市场指数（用于市场状态判断）。"""
+        """构建市场状态判断用的指数序列。
+
+        优先用真实宽基指数（沪深300）做趋势/波动；只有当宽基数据不可用时，
+        才回退到"池内等权伪指数"（循环论证的旧行为，标注为 fallback）。
+        只取 as_of_date 之前的数据，避免前视。
+        """
+        # ── 优先：真实宽基指数（沪深300） ──
+        if self._benchmark_index and "csi300" in self._benchmark_index:
+            bench = self._benchmark_index["csi300"]
+            df = bench[bench.index <= as_of_date]
+            if len(df) >= 200:
+                # 宽度维度用中证全指（若有），否则与趋势同源
+                return df.copy()
+
+        # ── Fallback：池内等权伪指数（循环论证，仅在宽基缺失时启用） ──
         if self._raw_data is None:
             return None
         from core.common.calendar import get_calendar
@@ -243,6 +281,7 @@ class ConfigDrivenStrategy:
             rows.append({"date": td, "close": sum(closes) / len(closes)})
         if not rows:
             return None
+        logger.debug("宽基指数不可用，市场状态回退到池内等权伪指数（%s）", as_of_date)
         return pd.DataFrame(rows).set_index("date").sort_index()
 
     def _should_rebalance(self, trade_date: date) -> bool:
@@ -295,36 +334,159 @@ class ConfigDrivenStrategy:
 
 
 def _get_codes(config: dict) -> list[str]:
-    codes = config.get("data_source", {}).get("codes", [])
+    """确定回测要拉取的全部代码。
+
+    - dynamic 模式：取所有月份候选宇宙的并集（行业成分股），一次性拉全，
+      回测中再按月切片（见 _build_monthly_universe）。行业成分按 industries
+      签名缓存，避免一次回测内多次联网拉取。
+    - fixed 模式（缺省）：用 data_source.codes 固定列表（向后兼容）。
+    """
+    ds = config.get("data_source", {})
+    uni = ds.get("universe", {})
+    if isinstance(uni, dict) and uni.get("mode") == "dynamic":
+        industries = uni.get("industries", [])
+        if not industries:
+            logger.error("dynamic 宇宙模式但未配置 data_source.universe.industries！")
+            return []
+        cache_key = tuple(industries)
+        if cache_key in _INDUSTRY_UNIVERSE_CACHE:
+            return _INDUSTRY_UNIVERSE_CACHE[cache_key]
+        from research.universe import build_industry_universe
+        codes = build_industry_universe(industries)
+        if not codes:
+            logger.error("行业成分股拉取失败，候选宇宙为空！")
+        _INDUSTRY_UNIVERSE_CACHE[cache_key] = codes
+        return codes
+
+    codes = ds.get("codes", [])
     if not codes:
         logger.error("configs/strategy.yaml 中 data_source.codes 为空！请在配置文件中设置股票池。")
         return []
     return list(dict.fromkeys(codes))  # 去重保序
 
 
-def _fetch_sina(codes: list[str], start: date, end: date) -> pd.DataFrame | None:
-    """从新浪接口拉取日K线。"""
+def _is_dynamic_universe(config: dict) -> bool:
+    uni = config.get("data_source", {}).get("universe", {})
+    return isinstance(uni, dict) and uni.get("mode") == "dynamic"
+
+
+def _build_monthly_universe(raw_data: dict[date, dict], config: dict) -> dict[date, list[str]]:
+    """预计算每个调仓月的候选宇宙 {month_anchor_date: [codes]}。
+
+    dynamic 模式下每月初用 PIT 信息重建宇宙；fixed 模式返回空 dict（策略
+    回退到全量 codes）。month_anchor 取每个自然月在回测数据中的首个交易日。
+    """
+    if not _is_dynamic_universe(config):
+        return {}
+
+    from research.universe import filter_universe_pit
+
+    uni = config["data_source"]["universe"]
+    candidates = _get_codes(config)
+    if not candidates:
+        return {}
+
+    pool_size = uni.get("pool_size", 30)
+    min_listing_months = uni.get("min_listing_months", 12)
+    min_avg_amount = float(uni.get("min_avg_amount", 200_000_000))
+
+    bt = config["backtest"]
+    bt_start = _parse_date(bt["start_date"])
+    bt_end = _parse_date(bt["end_date"])
+    if bt.get("validate_end"):
+        bt_end = max(bt_end, _parse_date(bt["validate_end"]))
+
+    # 真实上市日（用于次新剔除，替代"数据内交易日数"的不准近似）
+    from research.universe import fetch_listing_dates
+    listing_dates = fetch_listing_dates(candidates)
+
+    # 每个自然月的首个交易日（落在回测区间内）作为宇宙锚点
+    trade_dates = sorted(d for d in raw_data if bt_start <= d <= bt_end)
+    month_anchors: dict[tuple[int, int], date] = {}
+    for d in trade_dates:
+        key = (d.year, d.month)
+        if key not in month_anchors:
+            month_anchors[key] = d
+
+    monthly: dict[date, list[str]] = {}
+    for anchor in sorted(month_anchors.values()):
+        universe = filter_universe_pit(
+            candidates, anchor, raw_data,
+            min_listing_months=min_listing_months,
+            min_avg_amount=min_avg_amount,
+            pool_size=pool_size,
+            listing_dates=listing_dates,
+        )
+        monthly[anchor] = universe
+        logger.info("当月宇宙 %s: %d 只", anchor, len(universe))
+    return monthly
+
+
+def _universe_for_date(monthly_universe: dict[date, list[str]] | None,
+                       trade_date: date) -> list[str] | None:
+    """取 trade_date 所属月份（≤ trade_date 的最近锚点）的宇宙。"""
+    if not monthly_universe:
+        return None
+    anchors = sorted(d for d in monthly_universe if d <= trade_date)
+    if not anchors:
+        return None
+    return monthly_universe[anchors[-1]]
+
+
+
+def _fetch_one_sina(code: str, start: date, end: date) -> "pd.DataFrame | None":
+    """拉取单只股票的新浪日K线（供进程池调用，须为模块顶层函数以可 pickle）。"""
     import akshare as ak
+    import pandas as pd
+    try:
+        prefix = "sh" if code.startswith("6") else "sz"
+        raw = ak.stock_zh_a_daily(symbol=f"{prefix}{code}", adjust="qfq")
+        if raw is None or len(raw) == 0:
+            return None
+        df = raw.copy()
+        df["code"] = code
+        df["trade_date"] = pd.to_datetime(df["date"]).dt.date
+        df = df[(df["trade_date"] >= start) & (df["trade_date"] <= end)]
+        if len(df) == 0:
+            return None
+        for col in ["open", "high", "low", "close", "volume"]:
+            if col in df.columns:
+                df[col] = df[col].astype(float)
+        return df
+    except Exception:
+        return None
+
+
+def _fetch_sina(codes: list[str], start: date, end: date,
+                max_workers: int | None = None) -> "pd.DataFrame | None":
+    """从新浪接口并发拉取日K线（进程池：akshare 原生 HTTP 栈多线程会崩溃）。"""
+    return _fetch_parallel(_fetch_one_sina, codes, start, end, max_workers or _FETCH_WORKERS)
+
+
+def _fetch_parallel(worker, codes: list[str], start: date, end: date,
+                    max_workers: int) -> "pd.DataFrame | None":
+    """用进程池并发执行单只拉取函数，汇总为一个 DataFrame。
+
+    用进程池而非线程池：akshare 底层 HTTP 栈（PartitionAlloc）不支持多线程
+    并发初始化，会触发 native FATAL 崩溃。每个子进程有独立内存分配器，规避此问题。
+    """
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     frames = []
-    for code in codes:
-        try:
-            prefix = "sh" if code.startswith("6") else "sz"
-            raw = ak.stock_zh_a_daily(symbol=f"{prefix}{code}", adjust="qfq")
-            if raw is None or len(raw) == 0:
-                continue
-            df = raw.copy()
-            df["code"] = code
-            df["trade_date"] = pd.to_datetime(df["date"]).dt.date
-            df = df[(df["trade_date"] >= start) & (df["trade_date"] <= end)]
-            if len(df) == 0:
-                continue
-            for col in ["open", "high", "low", "close", "volume"]:
-                if col in df.columns:
-                    df[col] = df[col].astype(float)
-            frames.append(df)
-        except Exception:
-            continue
+    done = 0
+    total = len(codes)
+    with ProcessPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(worker, c, start, end): c for c in codes}
+        for fut in as_completed(futures):
+            try:
+                df = fut.result()
+            except Exception:
+                df = None
+            if df is not None:
+                frames.append(df)
+            done += 1
+            if done % 50 == 0 or done == total:
+                logger.info("  行情拉取进度: %d/%d", done, total)
 
     if not frames:
         return None
@@ -332,65 +494,56 @@ def _fetch_sina(codes: list[str], start: date, end: date) -> pd.DataFrame | None
     return combined.drop_duplicates(subset=["code", "trade_date"])
 
 
-def _fetch_eastmoney(codes: list[str], start: date, end: date) -> pd.DataFrame | None:
-    """从东方财富接口拉取（备用）—— 提供 OHLCV + 换手率。"""
+def _fetch_one_eastmoney(code: str, start: date, end: date) -> "pd.DataFrame | None":
+    """拉取单只股票的东方财富日K线（供进程池调用，须为模块顶层函数）。"""
     import akshare as ak
-
-    frames = []
-    for code in codes:
-        try:
-            raw = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-                adjust="qfq",
-            )
-            if raw is None or len(raw) == 0:
-                continue
-            df = raw.copy()
-            df["code"] = code
-            df["trade_date"] = pd.to_datetime(df["日期"]).dt.date
-            col_map = {"开盘": "open", "最高": "high", "最低": "low",
-                       "收盘": "close", "成交量": "volume", "换手率": "turnover"}
-            for cn, en in col_map.items():
-                if cn in df.columns:
-                    df[en] = df[cn].astype(float)
-            frames.append(df)
-        except Exception:
-            continue
-
-    if not frames:
+    import pandas as pd
+    try:
+        raw = ak.stock_zh_a_hist(
+            symbol=code, period="daily",
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+            adjust="qfq",
+        )
+        if raw is None or len(raw) == 0:
+            return None
+        df = raw.copy()
+        df["code"] = code
+        df["trade_date"] = pd.to_datetime(df["日期"]).dt.date
+        col_map = {"开盘": "open", "最高": "high", "最低": "low",
+                   "收盘": "close", "成交量": "volume", "换手率": "turnover"}
+        for cn, en in col_map.items():
+            if cn in df.columns:
+                df[en] = df[cn].astype(float)
+        return df
+    except Exception:
         return None
-    combined = pd.concat(frames, ignore_index=True)
-    return combined.drop_duplicates(subset=["code", "trade_date"])
+
+
+def _fetch_eastmoney(codes: list[str], start: date, end: date,
+                     max_workers: int | None = None) -> "pd.DataFrame | None":
+    """从东方财富接口并发拉取（备用，进程池）—— 提供 OHLCV + 换手率。"""
+    return _fetch_parallel(_fetch_one_eastmoney, codes, start, end, max_workers or _FETCH_WORKERS)
 
 
 def _supplement_turnover(raw_data: dict[date, dict], codes: list[str],
-                          start: date, end: date) -> None:
-    """从东方财富补充真实换手率数据，写入 raw_data 的 'turnover' 字段。"""
-    import akshare as ak
-    logger.info("正在补充换手率数据（东方财富）...")
+                          start: date, end: date, max_workers: int | None = None) -> None:
+    """从东方财富并发补充真实换手率数据，写入 raw_data 的 'turnover' 字段。
+
+    复用 _fetch_parallel（进程池）：东财单只拉取已含换手率列，直接取用。
+    """
+    logger.info("正在补充换手率数据（东方财富，进程池）...")
+    df = _fetch_parallel(_fetch_one_eastmoney, codes, start, end, max_workers or _FETCH_WORKERS)
+    if df is None or "turnover" not in df.columns:
+        logger.info("换手率补充完成: 0 条（无数据）")
+        return
     count = 0
-    for code in codes:
-        try:
-            raw = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-                adjust="qfq",
-            )
-            if raw is None or len(raw) == 0:
-                continue
-            for _, row in raw.iterrows():
-                try:
-                    td_raw = pd.to_datetime(row["日期"]).date()
-                except Exception:
-                    continue
-                if td_raw in raw_data and code in raw_data[td_raw]:
-                    raw_data[td_raw][code]["turnover"] = float(row.get("换手率", 0) or 0)
-                    count += 1
-        except Exception:
-            continue
+    for _, row in df.iterrows():
+        code = row.get("code")
+        td_raw = row.get("trade_date")
+        if td_raw in raw_data and code in raw_data[td_raw]:
+            raw_data[td_raw][code]["turnover"] = float(row.get("turnover", 0) or 0)
+            count += 1
     logger.info("换手率补充完成: %d 条", count)
 
 
@@ -415,34 +568,23 @@ def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
     provider = config.get("data_source", {}).get("provider", "sina")
 
     logger.info("正在从 %s 拉取 %d 只股票 (%s ~ %s)...", provider, len(codes), start, end)
+    logger.info("  (进程池并发拉取，规避 akshare 多线程原生崩溃)")
 
-    import threading
-    result: list = []
-    error_msg: list = []
+    # 直接同步调用进程池拉取：进程池自身管理子进程生命周期，不再套线程+join。
+    # （在 daemon 线程里再起 ProcessPoolExecutor 在 macOS spawn 模式下易死锁）
+    try:
+        if provider == "eastmoney":
+            raw_df = _fetch_eastmoney(codes, start, end)
+        else:
+            raw_df = _fetch_sina(codes, start, end)
+    except Exception as e:
+        logger.warning("%s 数据拉取失败: %s", provider, e)
+        return {}, str(e)
 
-    def _fetch():
-        try:
-            if provider == "eastmoney":
-                df = _fetch_eastmoney(codes, start, end)
-            else:
-                df = _fetch_sina(codes, start, end)
-            if df is not None and len(df) > 0:
-                result.append(df)
-            else:
-                error_msg.append("返回空数据")
-        except Exception as e:
-            error_msg.append(str(e))
+    if raw_df is None or len(raw_df) == 0:
+        logger.warning("%s 数据拉取失败: 返回空数据", provider)
+        return {}, "返回空数据"
 
-    t = threading.Thread(target=_fetch, daemon=True)
-    t.start()
-    t.join(timeout=120.0)
-
-    if not result:
-        reason = error_msg[0] if error_msg else "超时 (120s)"
-        logger.warning("%s 数据拉取失败: %s", provider, reason)
-        return {}, reason
-
-    raw_df = result[0]
     out: dict[date, dict] = {}
     for _, row in raw_df.iterrows():
         td = row.get("trade_date")
@@ -634,6 +776,47 @@ def _load_overseas_data(start: date, end: date) -> dict[date, dict[str, float]]:
 
 
 # ══════════════════════════════════════════════════════════════
+# 3.65 宽基指数加载（真实市场基准，用于市场状态判断）
+# ══════════════════════════════════════════════════════════════
+
+def _load_benchmark_index(start: date, end: date) -> dict[str, "pd.DataFrame"]:
+    """加载真实宽基指数日线，替代"池内等权伪指数"做市场状态判断。
+
+    - 沪深300 (000300) → regime 的 trend/volatility（市场趋势与波动）
+    - 中证全指 (000985) → regime 的 breadth 宽度近似（覆盖最广）
+
+    用 akshare stock_zh_index_daily 拉取，多取 3 年历史以满足 regime
+    对 200 日均线、252 日滚动波动率的回溯需求。
+
+    Returns:
+        {"csi300": DataFrame(index=date, columns=[close]),
+         "csi_all": DataFrame(...)}，加载失败的键缺省。
+    """
+    import akshare as ak
+
+    pad_start = start - timedelta(days=365 * 3 + 60)  # regime 需要长回溯
+    out: dict[str, pd.DataFrame] = {}
+
+    for symbol, key in [("sh000300", "csi300"), ("sh000985", "csi_all")]:
+        try:
+            raw = ak.stock_zh_index_daily(symbol=symbol)
+            if raw is None or len(raw) == 0:
+                logger.warning("宽基指数 %s 返回空", symbol)
+                continue
+            df = raw.copy()
+            df["trade_date"] = pd.to_datetime(df["date"]).dt.date
+            df = df[(df["trade_date"] >= pad_start) & (df["trade_date"] <= end)]
+            df = df.sort_values("trade_date")
+            df["close"] = df["close"].astype(float)
+            out[key] = df[["trade_date", "close"]].set_index("trade_date")
+            logger.info("宽基指数 %s 加载完成: %d 条", key, len(df))
+        except Exception as e:
+            logger.warning("宽基指数 %s 加载失败: %s", symbol, e)
+
+    return out
+
+
+# ══════════════════════════════════════════════════════════════
 # 3.7 全市场情绪数据（从池内OHLCV推算）
 # ══════════════════════════════════════════════════════════════
 
@@ -733,7 +916,8 @@ def _fix_pre_close(raw_data: dict[date, dict]) -> None:
 
 def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, dict[str, float]] | None = None,
                           overseas_data: dict[date, dict[str, float]] | None = None,
-                          market_wide_data: dict[date, dict[str, float]] | None = None):
+                          market_wide_data: dict[date, dict[str, float]] | None = None,
+                          monthly_universe: dict[date, list[str]] | None = None):
     """根据 config 构建 feature_loader 回调。"""
     from core.common.calendar import get_calendar
     cal = get_calendar()
@@ -834,7 +1018,9 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
 
         df = pd.DataFrame(results)
         if not df.empty:
-            df = _add_cross_sectional_factors(df, factors, price_hist)
+            # 横截面因子（相对强度）相对"当月宇宙"，而非全部拉取的代码
+            uni = _universe_for_date(monthly_universe, trade_date)
+            df = _add_cross_sectional_factors(df, factors, price_hist, universe=uni)
         return df.set_index("code") if not df.empty else df
 
     return loader
@@ -844,11 +1030,17 @@ def _add_cross_sectional_factors(
     df: pd.DataFrame,
     factors: list[dict],
     price_hist: dict[str, list[float]],
+    universe: list[str] | None = None,
 ) -> pd.DataFrame:
-    """计算需要横截面对比的因子（alpha动量、板块相对强度）。"""
-    factor_names = {f["name"] for f in factors}
+    """计算需要横截面对比的因子（alpha动量、板块相对强度）。
 
-    # alpha_momentum: 个股动量 - 等权市场平均动量
+    universe 给定时，"市场平均动量"相对当月候选宇宙计算，而非全部拉取
+    的代码（避免相对强度被无关股票稀释/扭曲）。
+    """
+    factor_names = {f["name"] for f in factors}
+    uni_set = set(universe) if universe else None
+
+    # alpha_momentum: 个股动量 - 等权市场平均动量（市场=当月宇宙）
     if any(n.startswith("alpha_momentum_") for n in factor_names):
         w = 20
         # 直接从价格序列重算动量，避免依赖其他因子列
@@ -859,8 +1051,10 @@ def _add_cross_sectional_factors(
                 mom_values[code] = prices[-1] / prices[-min(w, len(prices))] - 1.0
             else:
                 mom_values[code] = 0.0
-        if mom_values:
-            mean_mom = sum(mom_values.values()) / len(mom_values)
+        # 市场平均只用宇宙内标的（无宇宙则用全部）
+        basis = {c: m for c, m in mom_values.items() if uni_set is None or c in uni_set}
+        if basis:
+            mean_mom = sum(basis.values()) / len(basis)
             df["alpha_momentum_20d"] = df["code"].map(
                 lambda c: mom_values.get(c, 0.0) - mean_mom
             )
@@ -1160,19 +1354,24 @@ def _parse_date(s: str) -> date:
     return date.fromisoformat(s)
 
 
-def main(config_path: str = "configs/strategy.yaml") -> None:
+def main(config_path: str = "configs/strategy.yaml", full_range: bool = False) -> None:
     config = load_config(config_path)
     cfg_bt = config["backtest"]
 
-    # ★ 如果配置了 validate_start/validate_end，回测优先使用验证区间
-    # 否则回退到 start_date/end_date（也用作 optimizer 训练窗口）
-    if "validate_start" in cfg_bt and "validate_end" in cfg_bt:
+    # 回测区间选择：
+    # - full_range=True：用 start_date~end_date 完整训练区间（验证动态池逐月轮动、
+    #   夏普是否回落到现实水平）。这是验证幸存者偏差是否真消除的关键。
+    # - 否则：若配置了 validate_start/validate_end 则优先用验证区间（短样本，
+    #   夏普会失真，仅适合 dynamic vs fixed 的相对对比）。
+    if not full_range and "validate_start" in cfg_bt and "validate_end" in cfg_bt:
         start_date = _parse_date(cfg_bt["validate_start"])
         end_date = _parse_date(cfg_bt["validate_end"])
     else:
         start_date = _parse_date(cfg_bt["start_date"])
         end_date = _parse_date(cfg_bt["end_date"])
     initial_capital = cfg_bt["initial_capital"]
+    logger.info("回测区间: %s ~ %s%s", start_date, end_date,
+                "（完整训练区间）" if full_range else "")
 
     # ── 打印当前配置 ──
     enabled = _enabled_factors(config)
@@ -1205,7 +1404,7 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
         logger.error("    2. 配置文件: configs/strategy.yaml → data_source.provider")
         logger.error("       sina  → 走新浪财经接口（当前）")
         logger.error("       eastmoney → 走东方财富接口（备选）")
-        logger.error("    3. 单独测试: python -c \"import akshare as ak; print(ak.stock_zh_a_daily('sh600519','qfq').tail(3))\"")
+        logger.error("    3. 单独测试: python -c \"import akshare as ak; print(ak.stock_zh_a_daily(symbol='sh600519', adjust='qfq').tail(3))\"")
         logger.error("=" * 60)
         return
 
@@ -1218,18 +1417,32 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
         rows = [{"code": code, **fields} for code, fields in raw_data.get(trade_date, {}).items()]
         return pd.DataFrame(rows) if rows else pd.DataFrame()
 
-    # 加载基本面数据（如有）
-    codes = _get_codes(config)
-    financials = _load_financials(codes)
+    # 动态股票池：预计算每月候选宇宙（fixed 模式返回空 dict）
+    # 用实际回测窗口（start_date~end_date）覆盖月份锚点计算，确保 validate 模式
+    # 与 full_range 模式都按真实回测区间构建宇宙（去掉 validate_end 以免锚点越界）。
+    _uni_bt = dict(config["backtest"])
+    config["backtest"]["start_date"] = str(start_date)
+    config["backtest"]["end_date"] = str(end_date)
+    config["backtest"].pop("validate_end", None)
+    monthly_universe = _build_monthly_universe(raw_data, config)
+    config["backtest"] = _uni_bt  # 恢复
+
+    # 不加载基本面数据：所有基本面因子已被优化器 ALL_NO_DATA 过滤，
+    # 且 _load_financials 的 ROE 是伪造值（净利增速/营收增速），加载纯属浪费
+    financials: dict[str, dict[str, float]] = {}
 
     # 加载海外市场数据
     overseas_data = _load_overseas_data(start_date, end_date)
+
+    # 加载真实宽基指数（沪深300 + 中证全指）用于市场状态判断
+    benchmark_index = _load_benchmark_index(start_date, end_date)
 
     # 构建全市场情绪数据（从池内OHLCV推算）
     market_wide_data = _build_market_wide_from_pool(raw_data)
 
     feature_loader = _build_feature_loader(raw_data, config, financials,
-                                           overseas_data, market_wide_data)
+                                           overseas_data, market_wide_data,
+                                           monthly_universe=monthly_universe)
 
     # ── 回测 ──
     from core.backtest.engine import BacktestEngine
@@ -1238,7 +1451,16 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
         start_date=start_date, end_date=end_date,
         initial_capital=initial_capital,
     )
-    strategy = ConfigDrivenStrategy(config, raw_data, overseas_data)
+    # 注入沪深300日收盘做相对超额基准（{date: close}）
+    if benchmark_index and "csi300" in benchmark_index:
+        bench_df = benchmark_index["csi300"]
+        engine.benchmark_close = {
+            (d.date() if hasattr(d, "date") else d): float(c)
+            for d, c in bench_df["close"].items()
+        }
+    strategy = ConfigDrivenStrategy(config, raw_data, overseas_data,
+                                    benchmark_index=benchmark_index,
+                                    monthly_universe=monthly_universe)
 
     logger.info("开始回测 %s ~ %s (资金=¥%.0f)", start_date, end_date, initial_capital)
     result = engine.run(strategy, data_loader=data_loader, feature_loader=feature_loader)
@@ -1254,6 +1476,28 @@ def main(config_path: str = "configs/strategy.yaml") -> None:
         else:
             print(f"  {k:.<30s} {v!s:>10s}")
     print("=" * 60)
+
+    # ── 相对基准（沪深300）超额表现 ──
+    # 绝对夏普会把"跟跌"误判为失败。看相对基准才知道策略是真有 alpha 还是只跟涨跌。
+    if "benchmark_annual_return" in metrics:
+        ba = metrics["benchmark_annual_return"]
+        sa = metrics["annual_return"]
+        ea = metrics["excess_annual_return"]
+        ir = metrics["information_ratio"]
+        edd = metrics["excess_max_drawdown"]
+        verdict = "跑赢基准 ✓" if ea > 0 else "跑输基准 ✗"
+        print(f"\n相对基准（沪深300）—— {verdict}")
+        print(f"  策略年化 {sa*100:+.1f}%  vs  基准年化 {ba*100:+.1f}%  →  超额年化 {ea*100:+.1f}%")
+        print(f"  信息比率(IR) {ir:.3f}   |   超额最大回撤 {edd*100:.1f}%")
+        print(f"  （IR>0.5 才算有持续超额能力；绝对夏普受市场涨跌影响，超额口径更可信）")
+        print("=" * 60)
+
+    # 现金不足追加注资提示（若发生）
+    injected = metrics.get("total_injected", 0) or 0
+    if injected > 0:
+        print(f"\n⚠ 回测期间现金不足，累计假定追加注资 ¥{injected:,.0f}"
+              f"（有效投入资金 ¥{metrics.get('effective_capital', initial_capital):,.0f}）。"
+              f"\n  收益率指标仍按初始资金 ¥{initial_capital:,.0f} 计算，请留意真实投入更高。")
 
     if not result.trade_records.empty:
         filled = result.trade_records[result.trade_records["status"] == "filled"]
@@ -1437,5 +1681,9 @@ def _print_final_summary(trades_df, name_map: dict) -> None:
 
 if __name__ == "__main__":
     import sys as _sys
-    path = _sys.argv[1] if len(_sys.argv) > 1 else "configs/strategy.yaml"
-    main(path)
+    args = [a for a in _sys.argv[1:]]
+    # --full / --full-range：跑完整训练区间（start_date~end_date），而非验证窗口
+    full_range = any(a in ("--full", "--full-range") for a in args)
+    pos = [a for a in args if not a.startswith("-")]
+    path = pos[0] if pos else "configs/strategy.yaml"
+    main(path, full_range=full_range)

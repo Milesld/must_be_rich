@@ -6,6 +6,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+# 模型层依赖 sklearn（core.models.long_term 等）；缺失时整体跳过。
+pytest.importorskip("sklearn", reason="sklearn 未安装（模型层依赖）")
+
 # 检测 lightgbm 是否可用（网络受限环境可能未安装）
 try:
     import lightgbm  # noqa: F401
