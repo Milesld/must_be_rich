@@ -14,15 +14,78 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import date
+import time
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 行业成分本地缓存：成分股慢变（月度才调），缓存到磁盘防限流+加速。
+_CONS_CACHE_DIR = Path.home() / ".quant_system" / "industry_cons"
+_CONS_CACHE_TTL_DAYS = 7   # 缓存有效期（天）
+
+
+def _cons_cache_path(industry: str) -> Path:
+    # 行业名可能含特殊字符，用安全文件名
+    safe = "".join(c if c.isalnum() else "_" for c in industry)
+    return _CONS_CACHE_DIR / f"{safe}.json"
+
+
+def _load_cons_cache(industry: str) -> list[str] | None:
+    """读行业成分缓存；过期或不存在返回 None。"""
+    p = _cons_cache_path(industry)
+    if not p.exists():
+        return None
+    try:
+        obj = json.loads(p.read_text())
+        ts = datetime.fromisoformat(obj["fetched_at"])
+        if (datetime.now() - ts).days > _CONS_CACHE_TTL_DAYS:
+            return None
+        codes = obj.get("codes", [])
+        return codes if codes else None
+    except Exception:
+        return None
+
+
+def _save_cons_cache(industry: str, codes: list[str]) -> None:
+    try:
+        _CONS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _cons_cache_path(industry).write_text(json.dumps(
+            {"industry": industry, "fetched_at": datetime.now().isoformat(), "codes": codes},
+            ensure_ascii=False,
+        ))
+    except Exception as e:
+        logger.debug("行业 %s 成分缓存写入失败: %s", industry, e)
+
+
+def _fetch_industry_cons(industry: str) -> list[str] | None:
+    """拉单个行业成分（重试3次+退避），返回 6 位代码列表或 None。"""
+    import akshare as ak
+    for attempt in range(3):
+        try:
+            df = ak.stock_board_industry_cons_em(symbol=industry)
+            if df is not None and len(df) > 0:
+                code_col = "代码" if "代码" in df.columns else df.columns[1]
+                out: list[str] = []
+                for raw in df[code_col].astype(str):
+                    c = raw.strip().zfill(6)
+                    if c.isdigit() and len(c) == 6:
+                        out.append(c)
+                return out
+        except Exception:
+            pass
+        time.sleep(1.5 * (attempt + 1))
+    return None
+
 
 def build_industry_universe(industries: list[str]) -> list[str]:
     """从 akshare 行业板块取成分股代码（去重保序）。
+
+    优先读本地缓存（{_CONS_CACHE_TTL_DAYS} 天有效）；缓存缺失/过期才联网，
+    联网成功后回写缓存。这样防东财限流（RemoteDisconnected）+ 加速反复回测。
 
     Args:
         industries: akshare 行业板块名列表，如 ["半导体", "光学光电子"]。
@@ -33,43 +96,37 @@ def build_industry_universe(industries: list[str]) -> list[str]:
 
     ★ 返回的是"当前"成分，含轻度幸存者偏差（见模块 docstring）。
     """
-    import akshare as ak
-    import time
-
     codes: list[str] = []
     seen: set[str] = set()
     failed: list[str] = []
+
     for industry in industries:
-        df = None
-        # akshare 分页拉取偶发 "index out of bounds"（高并发更易触发），重试 3 次
-        for attempt in range(3):
-            try:
-                df = ak.stock_board_industry_cons_em(symbol=industry)
-                if df is not None and len(df) > 0:
-                    break
-            except Exception as e:
-                last_err = e
-                df = None
-            time.sleep(1.5 * (attempt + 1))  # 退避
-        if df is None or len(df) == 0:
-            logger.warning("行业 %s 成分股拉取失败（已重试3次），跳过", industry)
+        cons = _load_cons_cache(industry)
+        src = "缓存"
+        if cons is None:
+            cons = _fetch_industry_cons(industry)
+            src = "联网"
+            if cons:
+                _save_cons_cache(industry, cons)
+        if not cons:
+            logger.warning("行业 %s 成分股拉取失败（缓存无 + 联网重试3次失败）", industry)
             failed.append(industry)
             continue
-        # akshare 该接口代码列名为 "代码"
-        code_col = "代码" if "代码" in df.columns else df.columns[1]
-        for raw in df[code_col].astype(str):
-            c = raw.strip().zfill(6)
-            if c.isdigit() and len(c) == 6 and c not in seen:
+        added = 0
+        for c in cons:
+            if c not in seen:
                 codes.append(c)
                 seen.add(c)
-        logger.info("行业 %s: %d 只成分股", industry, len(df))
+                added += 1
+        logger.info("行业 %s: %d 只成分股（%s）", industry, len(cons), src)
 
     if failed:
         # 关键行业拉空会让候选宇宙残缺、回测失真，必须显式报错而非静默继续
         raise RuntimeError(
             f"以下行业成分股拉取失败，候选宇宙不完整: {failed}。"
-            f"请重跑（多为 akshare 偶发/限流），或核对行业名 "
-            f"(ak.stock_board_industry_name_em())。"
+            f"东财接口可能临时限流（RemoteDisconnected），稍后重跑即可；"
+            f"或核对行业名 (ak.stock_board_industry_name_em())。"
+            f"成功拉取的行业已缓存到 {_CONS_CACHE_DIR}。"
         )
 
     logger.info("候选宇宙合计 %d 只（%d 个行业并集）", len(codes), len(industries))
