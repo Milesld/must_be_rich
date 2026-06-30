@@ -106,8 +106,9 @@ FACTOR_POOL = {
             "rsi_14", "macd_dif", "bollinger_position", "ma_alignment",
             # 板块内横截面（1个）— 从OHLCV推算，数据可靠
             "sector_relative_strength_20d",
-            # 注意：announcement_sentiment_score 依赖 ths 财务数据构造代理文本，
-            # 数据精度不足，不纳入月频候选池（它更适合盘前日频场景）
+            # 基本面（2个）— 仅 westock provider 有真数据（真 ROE/营收同比，
+            # 按 InfoPublDate PIT 对齐）；非 westock 时仍被 ALL_NO_DATA 过滤。
+            "roe_ttm", "revenue_yoy",
         ],
     },
     "premarket": {
@@ -227,7 +228,7 @@ def _load_shared_data(config: dict) -> dict | None:
     """
     from research.run_backtest_demo import (
         _load_real_data, _load_overseas_data, _build_market_wide_from_pool,
-        _load_benchmark_index, _build_monthly_universe,
+        _load_benchmark_index, _build_monthly_universe, _provider,
     )
 
     bt = config["backtest"]
@@ -238,12 +239,20 @@ def _load_shared_data(config: dict) -> dict | None:
     if not raw_data or len(raw_data) < 100:
         return None
 
+    # westock 模式加载真财报时间序列（PIT 对齐用）；其它模式为空
+    financials = {}
+    if _provider(config) == "westock":
+        from research.westock_source import westock_financials
+        from research.run_backtest_demo import _get_codes
+        financials = westock_financials(_get_codes(config))
+
     return {
         "raw_data": raw_data,
         "overseas_data": _load_overseas_data(start_date, end_date),
         "market_wide_data": _build_market_wide_from_pool(raw_data),
-        "benchmark_index": _load_benchmark_index(start_date, end_date),
+        "benchmark_index": _load_benchmark_index(start_date, end_date, provider=_provider(config)),
         "monthly_universe": _build_monthly_universe(raw_data, config),
+        "financials": financials,
     }
 
 
@@ -289,6 +298,7 @@ def run_single_backtest(config: dict, label: str = "",
     market_wide_data = shared_data["market_wide_data"]
     benchmark_index = shared_data.get("benchmark_index")
     monthly_universe = shared_data.get("monthly_universe")
+    financials = shared_data.get("financials") or {}
 
     import pandas as pd
 
@@ -296,8 +306,8 @@ def run_single_backtest(config: dict, label: str = "",
         rows = [{"code": code, **fields} for code, fields in raw_data.get(trade_date, {}).items()]
         return pd.DataFrame(rows) if rows else pd.DataFrame()
 
-    # 不加载基本面数据：所有基本面因子已被 ALL_NO_DATA 过滤，financials 传空
-    feature_loader = _build_feature_loader(raw_data, config, {},
+    # 基本面财报（westock 时间序列，PIT 对齐）；非 westock 为空
+    feature_loader = _build_feature_loader(raw_data, config, financials,
                                            overseas_data, market_wide_data,
                                            monthly_universe=monthly_universe)
     strategy = ConfigDrivenStrategy(config, raw_data, overseas_data,
@@ -763,8 +773,14 @@ def optimize(
                         seen.add(c)
         label = "全部技术面因子"
 
-    candidates = [c for c in raw_candidates if c not in ALL_NO_DATA]
-    skipped = [c for c in raw_candidates if c in ALL_NO_DATA]
+    # 排除无数据源的因子。westock 模式下 roe_ttm/revenue_yoy 有真数据（PIT 对齐），
+    # 从排除集移出；其它 provider 仍排除（akshare 无可靠基本面）。
+    from research.run_backtest_demo import _provider
+    no_data = set(ALL_NO_DATA)
+    if _provider(base_config) == "westock":
+        no_data -= {"roe_ttm", "revenue_yoy"}
+    candidates = [c for c in raw_candidates if c not in no_data]
+    skipped = [c for c in raw_candidates if c in no_data]
 
     if skipped:
         print(f"  ⚠ 已排除 {len(skipped)} 个无数据源的因子")

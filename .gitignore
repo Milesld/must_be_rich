@@ -44,6 +44,7 @@ run_and_logs/
 # 本地安装的包（离线环境被迫手动装的）
 lightgbm/
 lightgbm-*.dist-info/
+westock-data/
 
 # C++ 编译产物
 cpp/build/

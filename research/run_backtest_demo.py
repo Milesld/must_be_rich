@@ -333,12 +333,18 @@ class ConfigDrivenStrategy:
 
 
 
+def _provider(config: dict) -> str:
+    return config.get("data_source", {}).get("provider", "sina")
+
+
 def _get_codes(config: dict) -> list[str]:
     """确定回测要拉取的全部代码。
 
     - dynamic 模式：取所有月份候选宇宙的并集（行业成分股），一次性拉全，
       回测中再按月切片（见 _build_monthly_universe）。行业成分按 industries
       签名缓存，避免一次回测内多次联网拉取。
+      · provider=westock：industries 视为 westock pt 板块码，走 westock_industry_cons。
+      · 其它 provider：industries 视为 akshare 行业中文名，走 build_industry_universe。
     - fixed 模式（缺省）：用 data_source.codes 固定列表（向后兼容）。
     """
     ds = config.get("data_source", {})
@@ -348,11 +354,15 @@ def _get_codes(config: dict) -> list[str]:
         if not industries:
             logger.error("dynamic 宇宙模式但未配置 data_source.universe.industries！")
             return []
-        cache_key = tuple(industries)
+        cache_key = (_provider(config),) + tuple(industries)
         if cache_key in _INDUSTRY_UNIVERSE_CACHE:
             return _INDUSTRY_UNIVERSE_CACHE[cache_key]
-        from research.universe import build_industry_universe
-        codes = build_industry_universe(industries)
+        if _provider(config) == "westock":
+            from research.westock_source import westock_industry_cons
+            codes = westock_industry_cons(industries)
+        else:
+            from research.universe import build_industry_universe
+            codes = build_industry_universe(industries)
         if not codes:
             logger.error("行业成分股拉取失败，候选宇宙为空！")
         _INDUSTRY_UNIVERSE_CACHE[cache_key] = codes
@@ -397,8 +407,12 @@ def _build_monthly_universe(raw_data: dict[date, dict], config: dict) -> dict[da
         bt_end = max(bt_end, _parse_date(bt["validate_end"]))
 
     # 真实上市日（用于次新剔除，替代"数据内交易日数"的不准近似）
-    from research.universe import fetch_listing_dates
-    listing_dates = fetch_listing_dates(candidates)
+    if _provider(config) == "westock":
+        from research.westock_source import westock_listing_dates
+        listing_dates = westock_listing_dates(candidates)
+    else:
+        from research.universe import fetch_listing_dates
+        listing_dates = fetch_listing_dates(candidates)
 
     # 每个自然月的首个交易日（落在回测区间内）作为宇宙锚点
     trade_dates = sorted(d for d in raw_data if bt_start <= d <= bt_end)
@@ -568,6 +582,41 @@ def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
     provider = config.get("data_source", {}).get("provider", "sina")
 
     logger.info("正在从 %s 拉取 %d 只股票 (%s ~ %s)...", provider, len(codes), start, end)
+
+    # ── westock 数据源（绕开 akshare 限流）──
+    if provider == "westock":
+        from research.westock_source import westock_kline
+        try:
+            raw_df = westock_kline(codes, start, end)
+        except Exception as ex:
+            logger.warning("westock 数据拉取失败: %s", ex)
+            return {}, str(ex)
+        if raw_df is None or len(raw_df) == 0:
+            return {}, "westock 返回空数据"
+        out: dict[date, dict] = {}
+        for _, row in raw_df.iterrows():
+            td = row["trade_date"]
+            code = str(row["code"])
+            close = float(row.get("close", 0) or 0)
+            if close <= 0:
+                continue
+            vol = float(row.get("volume", 0) or 0)
+            out.setdefault(td, {})[code] = {
+                "open": float(row.get("open", close) or close),
+                "high": float(row.get("high", close) or close),
+                "low": float(row.get("low", close) or close),
+                "close": close,
+                "pre_close": close * 0.99,  # 临时，_fix_pre_close 修正
+                "volume": vol,
+                "amount": float(row.get("amount", 0) or 0) or close * vol,
+                "turnover": float(row.get("turnover", 0) or 0),  # westock 自带换手率
+                "is_st": False,
+                "is_suspended": False,
+            }
+        # westock 自带换手率，无需 _supplement_turnover；仅修正 pre_close
+        _fix_pre_close(out)
+        return out, "ok"
+
     logger.info("  (进程池并发拉取，规避 akshare 多线程原生崩溃)")
 
     # 直接同步调用进程池拉取：进程池自身管理子进程生命周期，不再套线程+join。
@@ -631,6 +680,30 @@ def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
 # ══════════════════════════════════════════════════════════════
 # 3.5 基本面数据加载
 # ══════════════════════════════════════════════════════════════
+
+def _financials_as_of(fin_series: list[dict] | None, trade_date: date) -> dict[str, float]:
+    """PIT 取数：从财报时间序列取 announce_date < trade_date 的最近一期因子值。
+
+    Args:
+        fin_series: [{announce_date: date, roe_ttm:.., revenue_yoy:..}, ...]（按披露日升序）。
+        trade_date: 当前回测日。
+
+    Returns:
+        {factor: value}（不含 announce_date/end_date）。无已披露财报 → {}（因子中性）。
+    严格 PIT：用 < 而非 <=，确保只用"当日之前已披露"的财报，根除前视偏差。
+    """
+    if not fin_series:
+        return {}
+    chosen = None
+    for rec in fin_series:  # 升序，取最后一个 announce_date < trade_date 的
+        if rec["announce_date"] < trade_date:
+            chosen = rec
+        else:
+            break
+    if chosen is None:
+        return {}
+    return {k: v for k, v in chosen.items() if k not in ("announce_date", "end_date")}
+
 
 def _load_financials(codes: list[str]) -> dict[str, dict[str, float]]:
     """拉取基本面数据：使用东方财富个股财务摘要接口。
@@ -779,23 +852,42 @@ def _load_overseas_data(start: date, end: date) -> dict[date, dict[str, float]]:
 # 3.65 宽基指数加载（真实市场基准，用于市场状态判断）
 # ══════════════════════════════════════════════════════════════
 
-def _load_benchmark_index(start: date, end: date) -> dict[str, "pd.DataFrame"]:
+def _load_benchmark_index(start: date, end: date, provider: str = "sina") -> dict[str, "pd.DataFrame"]:
     """加载真实宽基指数日线，替代"池内等权伪指数"做市场状态判断。
 
     - 沪深300 (000300) → regime 的 trend/volatility（市场趋势与波动）
     - 中证全指 (000985) → regime 的 breadth 宽度近似（覆盖最广）
 
-    用 akshare stock_zh_index_daily 拉取，多取 3 年历史以满足 regime
-    对 200 日均线、252 日滚动波动率的回溯需求。
+    provider=westock 走 westock kline（指数也用 kline）；否则用 akshare
+    stock_zh_index_daily。多取 3 年历史以满足 regime 对 200 日均线、
+    252 日滚动波动率的回溯需求。
 
     Returns:
         {"csi300": DataFrame(index=date, columns=[close]),
          "csi_all": DataFrame(...)}，加载失败的键缺省。
     """
-    import akshare as ak
-
     pad_start = start - timedelta(days=365 * 3 + 60)  # regime 需要长回溯
     out: dict[str, pd.DataFrame] = {}
+
+    if provider == "westock":
+        from research.westock_source import westock_kline
+        # 指数用显式 westock 前缀码（沪深300/中证全指均为 sh 前缀，
+        # 不能靠 to_westock_code 的个股前缀规则推断）
+        for wcode, key in [("sh000300", "csi300"), ("sh000985", "csi_all")]:
+            try:
+                df = westock_kline([wcode], pad_start, end, batch=1)
+            except Exception as ex:
+                logger.warning("westock 宽基指数 %s 失败: %s", key, ex)
+                continue
+            if df is None or len(df) == 0:
+                logger.warning("westock 宽基指数 %s 返回空", key)
+                continue
+            df = df.sort_values("trade_date")
+            out[key] = df[["trade_date", "close"]].set_index("trade_date")
+            logger.info("宽基指数 %s 加载完成: %d 条（westock）", key, len(df))
+        return out
+
+    import akshare as ak
 
     for symbol, key in [("sh000300", "csi300"), ("sh000985", "csi_all")]:
         try:
@@ -914,11 +1006,17 @@ def _fix_pre_close(raw_data: dict[date, dict]) -> None:
 # 4. 因子计算
 # ══════════════════════════════════════════════════════════════
 
-def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, dict[str, float]] | None = None,
+def _build_feature_loader(raw_data: dict, config: dict, financials: dict | None = None,
                           overseas_data: dict[date, dict[str, float]] | None = None,
                           market_wide_data: dict[date, dict[str, float]] | None = None,
                           monthly_universe: dict[date, list[str]] | None = None):
-    """根据 config 构建 feature_loader 回调。"""
+    """根据 config 构建 feature_loader 回调。
+
+    financials：
+      - westock 模式为时间序列 {code: [{announce_date, roe_ttm, ...}]}，
+        loader 内对每个 trade_date 做 PIT 快照（_financials_as_of）。
+      - 其它模式传 {} 或旧式 {code:{factor:val}}（兼容，按整段当快照）。
+    """
     from core.common.calendar import get_calendar
     cal = get_calendar()
 
@@ -952,6 +1050,10 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
         today_overseas = overseas_data.get(trade_date, {}) if overseas_data else {}
         # 当日全市场数据
         today_market = market_wide_data.get(trade_date, {}) if market_wide_data else {}
+        # 是否时间序列版 financials（westock：value 是 list；旧式是 dict）
+        _fin_is_series = bool(financials) and any(
+            isinstance(v, list) for v in financials.values()
+        )
 
         # 构建价格序列
         price_hist: dict[str, list[float]] = {}
@@ -999,13 +1101,21 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict[str, di
 
             row: dict[str, Any] = {"code": code}
 
+            # 基本面 PIT 快照（westock 时间序列）；旧式则整段当快照
+            if not financials:
+                today_fin = {}
+            elif _fin_is_series:
+                today_fin = _financials_as_of(financials.get(code), trade_date)
+            else:
+                today_fin = financials.get(code, {})
+
             for fg in factors:
                 name = fg["name"]
                 try:
                     val = _compute_factor_value(
                         fg, arr, rets, vols_arr, high_arr, low_arr, prev_close,
                         amount_hist.get(code, []),
-                        financials.get(code, {}) if financials else {},
+                        today_fin,
                         today_overseas,
                         today_market,
                         turnover_hist.get(code, []),
@@ -1427,15 +1537,20 @@ def main(config_path: str = "configs/strategy.yaml", full_range: bool = False) -
     monthly_universe = _build_monthly_universe(raw_data, config)
     config["backtest"] = _uni_bt  # 恢复
 
-    # 不加载基本面数据：所有基本面因子已被优化器 ALL_NO_DATA 过滤，
-    # 且 _load_financials 的 ROE 是伪造值（净利增速/营收增速），加载纯属浪费
-    financials: dict[str, dict[str, float]] = {}
+    # 基本面数据：
+    # - westock 模式加载真财报时间序列（真 ROE/营收同比，按 InfoPublDate PIT 对齐）
+    # - 其它模式不加载（akshare _load_financials 的 ROE 是伪造值，已弃用）
+    if _provider(config) == "westock":
+        from research.westock_source import westock_financials
+        financials: dict = westock_financials(_get_codes(config))
+    else:
+        financials = {}
 
     # 加载海外市场数据
     overseas_data = _load_overseas_data(start_date, end_date)
 
     # 加载真实宽基指数（沪深300 + 中证全指）用于市场状态判断
-    benchmark_index = _load_benchmark_index(start_date, end_date)
+    benchmark_index = _load_benchmark_index(start_date, end_date, provider=_provider(config))
 
     # 构建全市场情绪数据（从池内OHLCV推算）
     market_wide_data = _build_market_wide_from_pool(raw_data)

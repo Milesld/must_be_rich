@@ -21,7 +21,11 @@
       "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/run_backtest_demo.py)",
       "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/run_backtest_demo.py research/universe.py)",
       "Bash(chmod +x scripts/run_optimizers_parallel.sh)",
-      "Bash(bash -n scripts/run_optimizers_parallel.sh)"
+      "Bash(bash -n scripts/run_optimizers_parallel.sh)",
+      "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/westock_source.py)",
+      "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/westock_source.py research/run_backtest_demo.py research/factor_optimizer.py)",
+      "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/westock_source.py research/run_backtest_demo.py)",
+      "Bash(awk '/优化结果/{f=1} f' optimizer_semiconductor.log)"
     ]
   }
 }
