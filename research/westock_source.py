@@ -229,24 +229,39 @@ def _date_segments(start: date, end: date, seg_days: int = _SEG_DAYS):
 
 
 def _fetch_one_segment(code: str, s: str, e: str) -> list[dict]:
-    """拉单只单段 K 线，返回标准化 row 列表（含 code）。带行情磁盘缓存。"""
+    """拉单只单段 K 线，返回标准化 row 列表（含 code）。带行情磁盘缓存。
+
+    密集请求会触发 westock 限流（返回 None）。策略：段间小延时 + 拉空重试 2 次
+    （退避 2s/4s）。注意次新股某段本就无数据，重试也是空——故重试次数克制（2 次）。
+    """
     cache_key = f"kline_{code}_{s}_{e}"
     cached = _cache_get(cache_key, ttl_days=3650)  # 历史行情不变，长期缓存
     if cached is not None:
         return cached
-    try:
-        data = _run_westock_json(
-            ["kline", to_westock_code(code), "--period", "day",
-             "--start", s, "--end", e, "--fq", "qfq"],
-            timeout=60.0,
-        )
-    except Exception as ex:
-        logger.warning("westock kline %s %s~%s 失败: %s", code, s, e, ex)
-        return []
-    # 防御：data 可能是 None / 字符串（错误消息）/ dict，只接受 list
+
+    import time
+    time.sleep(0.15)  # 段间基础延时，降低触发限流概率
+
+    data = None
+    for attempt in range(3):  # 首次 + 2 次重试
+        try:
+            data = _run_westock_json(
+                ["kline", to_westock_code(code), "--period", "day",
+                 "--start", s, "--end", e, "--fq", "qfq"],
+                timeout=60.0,
+            )
+        except Exception as ex:
+            logger.warning("westock kline %s %s~%s 调用异常: %s", code, s, e, ex)
+            data = None
+        if isinstance(data, list):
+            break  # 拿到数组（含空数组=该段真无数据，不重试）
+        if attempt < 2:
+            time.sleep(2.0 * (attempt + 1))  # 限流退避 2s/4s
+
+    # 非数组（None/str）= 限流或错误；空数组 = 该段真无数据（次新）
     if not isinstance(data, list):
-        logger.warning("westock kline %s %s~%s 返回非数组（%s），跳过该段",
-                       code, s, e, type(data).__name__)
+        logger.warning("westock kline %s %s~%s 重试后仍非数组（疑限流），跳过该段",
+                       code, s, e)
         return []
     rows: list[dict] = []
     for r in data:
@@ -432,20 +447,38 @@ def _fetch_one_financials(code: str, num: int) -> list[dict]:
             continue
         rec: dict = {"announce_date": ad, "end_date": end_date}
 
-        # roe_ttm = 归母净利TTM / 期末净资产（同报告期 balance）
         np_ttm = _to_float(inc.get("NPParentCompanyOwnersTTM"))
+        rev_ttm = _to_float(inc.get("OperatingRevenueTTM"))
+        gross_ttm = _to_float(inc.get("GrossProfitTTM"))
         bal = bal_by_end.get(end_date)
         se = _to_float(bal.get("SEWithoutMI")) if bal else None
+
+        # ── 原始量保留（B 类 PB/PE 计算需 PIT 净利/净资产）──
+        if np_ttm is not None:
+            rec["_np_ttm"] = np_ttm
+        if se and se > 0:
+            rec["_equity"] = se
+
+        # roe_ttm = 归母净利TTM / 期末净资产
         if np_ttm is not None and se and se > 0:
             rec["roe_ttm"] = np_ttm / se
+        # net_margin_ttm = 归母净利TTM / 营收TTM
+        if np_ttm is not None and rev_ttm and rev_ttm > 0:
+            rec["net_margin_ttm"] = np_ttm / rev_ttm
+        # gross_margin = 毛利TTM / 营收TTM
+        if gross_ttm is not None and rev_ttm and rev_ttm > 0:
+            rec["gross_margin"] = gross_ttm / rev_ttm
 
-        # revenue_yoy = 本期营收TTM / 去年同报告期营收TTM − 1
-        rev_ttm = _to_float(inc.get("OperatingRevenueTTM"))
+        # 同比（营收/净利）：本期 TTM / 去年同报告期 TTM − 1
         prev_end = _prev_year_end_date(end_date)
         prev_inc = inc_by_end.get(prev_end) if prev_end else None
-        prev_rev = _to_float(prev_inc.get("OperatingRevenueTTM")) if prev_inc else None
-        if rev_ttm is not None and prev_rev and prev_rev > 0:
-            rec["revenue_yoy"] = rev_ttm / prev_rev - 1.0
+        if prev_inc:
+            prev_rev = _to_float(prev_inc.get("OperatingRevenueTTM"))
+            if rev_ttm is not None and prev_rev and prev_rev > 0:
+                rec["revenue_yoy"] = rev_ttm / prev_rev - 1.0
+            prev_np = _to_float(prev_inc.get("NPParentCompanyOwnersTTM"))
+            if np_ttm is not None and prev_np and prev_np > 0:
+                rec["net_profit_yoy"] = np_ttm / prev_np - 1.0
 
         series.append(rec)
 
@@ -462,5 +495,46 @@ def _prev_year_end_date(end_date: str) -> "str | None":
         return date(d.year - 1, d.month, d.day).isoformat()
     except (ValueError, TypeError):
         return None
+
+
+# ══════════════════════════════════════════════════════════════
+# 总股本（用于 PB/PE 估值因子；westock 无历史股本，取当前值）
+# ══════════════════════════════════════════════════════════════
+
+def westock_total_shares(codes: list[str], batch: int = 50) -> dict[str, float]:
+    """批量取当前总股本（quote 的 total_shares，单位=股）。带缓存。
+
+    ★ 取当前值——westock 不提供历史股本。用于 PB/PE 时有小瑕疵
+      （增发/回购致历史股本不同），但远小于直接用今日 PB/PE。
+    """
+    result: dict[str, float] = {}
+    todo: list[str] = []
+    for c in codes:
+        cached = _cache_get(f"shares_{c}", ttl_days=30)
+        if cached is not None:
+            result[c] = float(cached)
+        else:
+            todo.append(c)
+
+    for i in range(0, len(todo), batch):
+        chunk = todo[i:i + batch]
+        wcodes = ",".join(to_westock_code(c) for c in chunk)
+        try:
+            data = _run_westock_json(["quote", wcodes], timeout=60.0)
+        except Exception as ex:
+            logger.warning("westock quote 股本批次失败: %s", ex)
+            continue
+        rows = data if isinstance(data, list) else [data]
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            sym = r.get("symbol") or r.get("code")
+            ts = _to_float(r.get("total_shares"))
+            if sym and ts and ts > 0:
+                code6 = _strip_prefix(str(sym))
+                result[code6] = ts
+                _cache_put(f"shares_{code6}", ts)
+    logger.info("westock 总股本加载: %d/%d 只", len(result), len(codes))
+    return result
 
 

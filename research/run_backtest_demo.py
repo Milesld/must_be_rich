@@ -73,7 +73,7 @@ class ConfigDrivenStrategy:
     """
 
     # 哪些因子是"越低越好"（反转排名）— 支持前缀匹配覆盖窗口变体
-    INVERSE_EXACT = {"pe_ttm", "pb", "debt_ratio", "amihud_illiq"}
+    INVERSE_EXACT = {"pe_ttm", "pb", "peg", "debt_ratio", "amihud_illiq"}
     INVERSE_PREFIXES = ("volatility_", "amplitude_", "atr_")
 
     def _is_inverse(self, name: str) -> bool:
@@ -1009,16 +1009,19 @@ def _fix_pre_close(raw_data: dict[date, dict]) -> None:
 def _build_feature_loader(raw_data: dict, config: dict, financials: dict | None = None,
                           overseas_data: dict[date, dict[str, float]] | None = None,
                           market_wide_data: dict[date, dict[str, float]] | None = None,
-                          monthly_universe: dict[date, list[str]] | None = None):
+                          monthly_universe: dict[date, list[str]] | None = None,
+                          total_shares: dict[str, float] | None = None):
     """根据 config 构建 feature_loader 回调。
 
     financials：
       - westock 模式为时间序列 {code: [{announce_date, roe_ttm, ...}]}，
         loader 内对每个 trade_date 做 PIT 快照（_financials_as_of）。
       - 其它模式传 {} 或旧式 {code:{factor:val}}（兼容，按整段当快照）。
+    total_shares：{code: 当前总股本}，B 类估值因子 pb/pe_ttm/peg 用（缺则该因子中性）。
     """
     from core.common.calendar import get_calendar
     cal = get_calendar()
+    total_shares = total_shares or {}
 
     factors = _enabled_factors(config)
     factor_settings = config.get("factor_settings", {})
@@ -1119,6 +1122,8 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict | None 
                         today_overseas,
                         today_market,
                         turnover_hist.get(code, []),
+                        close_price=float(arr[-1]),
+                        total_shares=total_shares.get(code),
                     )
                     row[name] = float(val) if val is not None and not np.isnan(val) else 0.0
                 except Exception:
@@ -1203,9 +1208,15 @@ def _compute_factor_value(
     overseas: dict[str, float] | None = None,
     market_wide: dict[str, float] | None = None,
     turnover_vals: list | None = None,
+    close_price: float | None = None,
+    total_shares: float | None = None,
 ) -> float | None:
     """在内存数据上直接计算因子值（不走 core/features 的完整实现，
-    因为后者依赖 FeatureStore 和特定的 DataFrame 格式）。"""
+    因为后者依赖 FeatureStore 和特定的 DataFrame 格式）。
+
+    close_price/total_shares：B 类估值因子（pb/pe_ttm/peg）用，
+    PB = close×shares / PIT净资产，PE = close×shares / PIT净利TTM。
+    """
 
     name = fg["name"]
     params = fg.get("params", {})
@@ -1368,10 +1379,30 @@ def _compute_factor_value(
         if name == "limit_up_ratio":
             return market_wide.get("limit_up_ratio", 0)
 
-        # ── 基本面因子（从已加载的 financials 字典读取）───
-        # 待拉取的数据: pe_ttm/pb/ps_ttm/pcf_ttm/roe_ttm/roa_ttm/roic_ttm/
-        #              gross_margin/net_margin_ttm/revenue_yoy/net_profit_yoy/
-        #              debt_ratio/current_ratio/quick_ratio/cf_ratio_ttm
+        # ── B 类估值因子：用历史 close × 当前股本 / PIT 财报实时算 ──
+        # 不用 quote 的当前 PB/PE（会前视）。财报缺失/股本缺失 → 中性。
+        fin = financials or {}
+        if name in ("pb", "pe_ttm", "peg"):
+            if not close_price or not total_shares:
+                return None  # 缺市值数据 → 中性（→0）
+            mktcap = close_price * total_shares
+            if name == "pb":
+                equity = fin.get("_equity")
+                return float(mktcap / equity) if equity and equity > 0 else None
+            if name == "pe_ttm":
+                np_ttm = fin.get("_np_ttm")
+                # 亏损（净利≤0）→ PE 无意义，返回中性
+                return float(mktcap / np_ttm) if np_ttm and np_ttm > 0 else None
+            if name == "peg":
+                np_ttm = fin.get("_np_ttm")
+                npy = fin.get("net_profit_yoy")
+                if not np_ttm or np_ttm <= 0 or not npy or npy <= 0:
+                    return None  # 亏损或负增长 → PEG 无意义
+                pe = mktcap / np_ttm
+                return float(pe / (npy * 100.0))
+
+        # ── 基本面因子（A 类：从 PIT 财报快照直接读）───
+        #   gross_margin/net_margin_ttm/roe_ttm/revenue_yoy/net_profit_yoy
         if financials and name in financials:
             return financials[name]
 
@@ -1539,12 +1570,16 @@ def main(config_path: str = "configs/strategy.yaml", full_range: bool = False) -
 
     # 基本面数据：
     # - westock 模式加载真财报时间序列（真 ROE/营收同比，按 InfoPublDate PIT 对齐）
+    #   + 当前总股本（B 类估值因子 PB/PE/PEG 用）
     # - 其它模式不加载（akshare _load_financials 的 ROE 是伪造值，已弃用）
     if _provider(config) == "westock":
-        from research.westock_source import westock_financials
-        financials: dict = westock_financials(_get_codes(config))
+        from research.westock_source import westock_financials, westock_total_shares
+        _codes = _get_codes(config)
+        financials: dict = westock_financials(_codes)
+        total_shares: dict = westock_total_shares(_codes)
     else:
         financials = {}
+        total_shares = {}
 
     # 加载海外市场数据
     overseas_data = _load_overseas_data(start_date, end_date)
@@ -1557,7 +1592,8 @@ def main(config_path: str = "configs/strategy.yaml", full_range: bool = False) -
 
     feature_loader = _build_feature_loader(raw_data, config, financials,
                                            overseas_data, market_wide_data,
-                                           monthly_universe=monthly_universe)
+                                           monthly_universe=monthly_universe,
+                                           total_shares=total_shares)
 
     # ── 回测 ──
     from core.backtest.engine import BacktestEngine

@@ -106,9 +106,12 @@ FACTOR_POOL = {
             "rsi_14", "macd_dif", "bollinger_position", "ma_alignment",
             # 板块内横截面（1个）— 从OHLCV推算，数据可靠
             "sector_relative_strength_20d",
-            # 基本面（2个）— 仅 westock provider 有真数据（真 ROE/营收同比，
-            # 按 InfoPublDate PIT 对齐）；非 westock 时仍被 ALL_NO_DATA 过滤。
-            "roe_ttm", "revenue_yoy",
+            # 基本面（8个）— 仅 westock provider 有真数据（真 ROE/营收同比/毛利率/
+            # 净利率/净利同比 + PB/PE/PEG，按 InfoPublDate PIT 对齐，PB/PE 用历史
+            # close×当前股本/PIT财报重算）；非 westock 时仍被 ALL_NO_DATA 过滤。
+            "roe_ttm", "revenue_yoy", "net_profit_yoy",
+            "gross_margin", "net_margin_ttm",
+            "pb", "pe_ttm", "peg",
         ],
     },
     "premarket": {
@@ -239,12 +242,15 @@ def _load_shared_data(config: dict) -> dict | None:
     if not raw_data or len(raw_data) < 100:
         return None
 
-    # westock 模式加载真财报时间序列（PIT 对齐用）；其它模式为空
+    # westock 模式加载真财报时间序列（PIT 对齐用）+ 总股本（PB/PE 用）；其它模式为空
     financials = {}
+    total_shares = {}
     if _provider(config) == "westock":
-        from research.westock_source import westock_financials
+        from research.westock_source import westock_financials, westock_total_shares
         from research.run_backtest_demo import _get_codes
-        financials = westock_financials(_get_codes(config))
+        _codes = _get_codes(config)
+        financials = westock_financials(_codes)
+        total_shares = westock_total_shares(_codes)
 
     return {
         "raw_data": raw_data,
@@ -253,6 +259,7 @@ def _load_shared_data(config: dict) -> dict | None:
         "benchmark_index": _load_benchmark_index(start_date, end_date, provider=_provider(config)),
         "monthly_universe": _build_monthly_universe(raw_data, config),
         "financials": financials,
+        "total_shares": total_shares,
     }
 
 
@@ -299,6 +306,7 @@ def run_single_backtest(config: dict, label: str = "",
     benchmark_index = shared_data.get("benchmark_index")
     monthly_universe = shared_data.get("monthly_universe")
     financials = shared_data.get("financials") or {}
+    total_shares = shared_data.get("total_shares") or {}
 
     import pandas as pd
 
@@ -306,10 +314,11 @@ def run_single_backtest(config: dict, label: str = "",
         rows = [{"code": code, **fields} for code, fields in raw_data.get(trade_date, {}).items()]
         return pd.DataFrame(rows) if rows else pd.DataFrame()
 
-    # 基本面财报（westock 时间序列，PIT 对齐）；非 westock 为空
+    # 基本面财报（westock 时间序列，PIT 对齐）+ 总股本（PB/PE）；非 westock 为空
     feature_loader = _build_feature_loader(raw_data, config, financials,
                                            overseas_data, market_wide_data,
-                                           monthly_universe=monthly_universe)
+                                           monthly_universe=monthly_universe,
+                                           total_shares=total_shares)
     strategy = ConfigDrivenStrategy(config, raw_data, overseas_data,
                                     benchmark_index=benchmark_index,
                                     monthly_universe=monthly_universe)
@@ -778,7 +787,10 @@ def optimize(
     from research.run_backtest_demo import _provider
     no_data = set(ALL_NO_DATA)
     if _provider(base_config) == "westock":
-        no_data -= {"roe_ttm", "revenue_yoy"}
+        # westock 有真财报 + PIT 重算 PB/PE，放开这 8 个基本面因子
+        no_data -= {"roe_ttm", "revenue_yoy", "net_profit_yoy",
+                    "gross_margin", "net_margin_ttm",
+                    "pb", "pe_ttm", "peg"}
     candidates = [c for c in raw_candidates if c not in no_data]
     skipped = [c for c in raw_candidates if c in no_data]
 

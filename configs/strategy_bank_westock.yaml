@@ -1,6 +1,7 @@
 # ══════════════════════════════════════════════════════════
-# 策略配置 — semiconductor 细分池（westock 数据源版）
-# 行情/行业成分/上市日走 westock-data（腾讯源），绕开 akshare 限流。
+# 策略配置 — 银行（价值板块，westock 数据源版）
+# 目的：检验基本面因子（ROE/营收同比）在价值股是否比在半导体（成长股）更有效。
+# 银行高股息、低估值、ROE 稳定，是基本面应最有用的板块。
 # industries 填 westock 申万 pt 板块码（非中文名）。
 # ══════════════════════════════════════════════════════════
 
@@ -15,13 +16,13 @@ data_source:
   provider: westock              # westock | sina | eastmoney
   lookback_days: 400
   # ── 动态股票池（PIT 候选宇宙）──
-  # westock 模式：industries 填 pt 板块码（用 search <名> --type sector 查）。
+  # westock 模式：industries 填 pt 板块码（用 search 银行 --type sector 核对）。
   # ★ 残留偏差：成分是"当前"成分，回放历史仍有轻度幸存者偏差。
   universe:
     mode: dynamic                 # dynamic | fixed（缺省 fixed 用 codes）
-    industries:                   # westock pt 板块码（申万二级，已用 search 核对）
-      - "pt01801081"              # 半导体（178 只，已验证）
-    pool_size: 30                 # 每月候选宇宙上限（按日均成交额取 top）
+    industries:                   # 银行申万一级（westock 已核对：pt01801780=银行一级）
+      - "pt01801780"              # 银行（申万一级，覆盖国有+股份制+城商+农商）
+    pool_size: 30                 # 每月候选宇宙上限（银行股约 40 只，足够）
     min_listing_months: 12        # 上市满 12 个月（剔除次新）
     min_avg_amount: 200000000     # 过去 60 日均成交额 ≥ 2 亿（流动性）
   # fixed 模式回退用的固定列表（dynamic 模式下不生效，保留供对比）
