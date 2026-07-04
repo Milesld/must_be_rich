@@ -25,7 +25,8 @@
       "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/westock_source.py)",
       "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/westock_source.py research/run_backtest_demo.py research/factor_optimizer.py)",
       "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/westock_source.py research/run_backtest_demo.py)",
-      "Bash(awk '/优化结果/{f=1} f' optimizer_semiconductor.log)"
+      "Bash(awk '/优化结果/{f=1} f' optimizer_semiconductor.log)",
+      "Bash(awk '/优化结果/{f=1} f' optimizer_bank.log)"
     ]
   }
 }
