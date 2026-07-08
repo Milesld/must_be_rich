@@ -435,6 +435,7 @@ def optimize_optuna(
     factor_max_weight: dict[str, float] | None = None,
     halflife_years: float | None = None,
     shared_data: dict | None = None,
+    default_max_weight: float | None = None,
 ) -> list[dict] | None:
     try:
         import optuna
@@ -471,10 +472,11 @@ def optimize_optuna(
         weights = raw_weights / raw_weights.sum()
         weights_float = [float(w) for w in weights]
 
-        # 单因子权重上限：防止 optimizer 把宝全押在一个因子上
-        # 默认: amihud_illiq 0.20, 其他 0.40。可通过 factor_max_weight 按策略覆盖
-        DEFAULT_MAX_WEIGHT = 0.40
-        FACTOR_MAX_WEIGHT: dict[str, float] = {"amihud_illiq": 0.20}
+        # 单因子权重上限：防止 optimizer 把宝全押在一个因子上。
+        # 默认 0.40；WF 模式下 std 惩罚已防过拟合，可用 yaml optimizer.default_max_weight
+        # 放宽（如 1.0=不限）做对照实验。amihud 单独 0.20（非流动性是约束项非 alpha）。
+        DEFAULT_MAX_WEIGHT = float(default_max_weight) if default_max_weight else 0.40
+        FACTOR_MAX_WEIGHT: dict[str, float] = {"amihud_illiq": min(0.20, DEFAULT_MAX_WEIGHT)}
         if factor_max_weight:
             FACTOR_MAX_WEIGHT.update(factor_max_weight)
         MAX_REDISTRIBUTE = 5  # 最多重分配 5 次以防死循环
@@ -766,6 +768,8 @@ def optimize(
 
     # 从 YAML 读取单因子权重上限（可选，未配置则使用 optimizer 内置默认值）
     factor_max_weight = base_config.get("factor_max_weight", None)
+    # 全局默认权重上限（可选）；optimizer.default_max_weight=1.0 即放开上限做对照
+    default_max_weight = optimizer_cfg.get("default_max_weight", None)
 
     # 确定候选池，排除无数据源的因子
     if task and task in FACTOR_POOL:
@@ -837,7 +841,8 @@ def optimize(
 
     # 搜索
     optuna_results = optimize_optuna(base_config, candidates, rounds, min_factors, max_factors,
-                                     factor_max_weight, halflife_years, shared_data=shared_data)
+                                     factor_max_weight, halflife_years, shared_data=shared_data,
+                                     default_max_weight=default_max_weight)
     if optuna_results is not None:
         print("  ✓ 使用 Optuna TPE 引擎")
         results = optuna_results

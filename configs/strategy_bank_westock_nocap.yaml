@@ -1,0 +1,273 @@
+# ══════════════════════════════════════════════════════════
+# 策略配置 — 银行（价值板块，westock 数据源版）
+# 目的：检验基本面因子（ROE/营收同比）在价值股是否比在半导体（成长股）更有效。
+# 银行高股息、低估值、ROE 稳定，是基本面应最有用的板块。
+# industries 填 westock 申万 pt 板块码（非中文名）。
+# ══════════════════════════════════════════════════════════
+
+backtest:
+  end_date: '2025-12-31'
+  validate_start: "2026-01-01"   # 回测验证区间起点（optimizer 忽略此字段）
+  validate_end: "2026-06-25"     # 回测验证区间终点
+  initial_capital: 200000
+  start_date: '2023-01-01'
+
+data_source:
+  provider: westock              # westock | sina | eastmoney
+  lookback_days: 400
+  # ── 动态股票池（PIT 候选宇宙）──
+  # westock 模式：industries 填 pt 板块码（用 search 银行 --type sector 核对）。
+  # ★ 残留偏差：成分是"当前"成分，回放历史仍有轻度幸存者偏差。
+  universe:
+    mode: dynamic                 # dynamic | fixed（缺省 fixed 用 codes）
+    industries:                   # 银行申万一级（westock 已核对：pt01801780=银行一级）
+      - "pt01801780"              # 银行（申万一级，覆盖国有+股份制+城商+农商）
+    pool_size: 30                 # 每月候选宇宙上限（银行股约 40 只，足够）
+    min_listing_months: 12        # 上市满 12 个月（剔除次新）
+    min_avg_amount: 200000000     # 过去 60 日均成交额 ≥ 2 亿（流动性）
+  # fixed 模式回退用的固定列表（dynamic 模式下不生效，保留供对比）
+  codes:
+    - "002415"
+    - "603501"
+    - "002049"
+    - "603160"
+    - "603986"
+    - "300661"
+    - "300474"
+    - "002409"
+    - "002371"
+    - "300604"
+    - "300346"
+    - "002436"
+    - "002916"
+    - "002156"
+    - "600584"
+    - "002185"
+    - "000725"
+    - "000977"
+    - "603019"
+    - "600410"
+    - "300308"
+    - "300502"
+    - "300394"
+    - "002281"
+    - "000988"
+    - "000063"
+    - "600498"
+    - "300383"
+    - "603881"
+    - "300738"
+
+strategy:
+  min_shares: 100
+  optimizer: equal_weight
+  rebalance_frequency: monthly
+  top_n: 3
+
+regime:
+  emergency_threshold: 0.4
+  enabled: true
+  max_position_ratio: 0.9
+  min_position_ratio: 0.2
+  params:
+    # 趋势/波动来自真实宽基指数（沪深300），不再是池内伪指数。
+    # valuation 维度暂无数据源（恒中性 0.5），权重归零，原 0.05 并入 trend。
+    dimension_weights:
+      trend: 0.30
+      volatility: 0.25
+      breadth: 0.15
+      overseas: 0.30
+      valuation: 0.00
+
+factor_max_weight:
+  alpha_momentum_20d: 0.25
+
+optimizer:
+  time_decay_halflife: 1.0 #0.5
+  # ── 对照实验：放开单因子权重上限（default_max_weight=1.0）──
+  # WF 模式的 std 惩罚已防过拟合，不再需要权重上限硬压。用于验证顶格值是
+  # "约束扭曲"还是"数据选择"。基线(strategy_bank_westock.yaml)用默认 0.40。
+  default_max_weight: 1.0       # 1.0=不限单因子权重（对照；默认 0.40）
+  # ── Walk-Forward 样本外评分（防过拟合）──
+  use_walk_forward: true
+  wf_lambda: 0.5                # std 惩罚系数
+  wf_train_years: 2             # 训练窗口（年）
+  wf_test_months: 3            # 每段样本外窗口（月）= 前滚步长
+  wf_purge_days: 5             # 训练/测试间清除期（交易日）
+  wf_min_train_years: 1        # 最小训练窗口（年）
+
+# ══════════════════════════════════════════════════════════
+# 6因子组合：双动量+低波动反转，时间衰减适配
+# ══════════════════════════════════════════════════════════
+factors:
+  momentum_60d:
+    enabled: true
+    weight: 0.4
+    module: core.features.technical
+    function: momentum
+    params: {window: 60}
+    description: "60日动量 — 半导体中期趋势核心（时间加权下近期动量更重要）"
+
+  volatility_20d:
+    enabled: true
+    weight: 0.222
+    module: core.features.technical
+    function: volatility
+    params: {window: 20}
+    description: "20日波动率 — 反转项，低波更稳（时间加权大幅提升了此因子权重）"
+
+  ma_alignment:
+    enabled: true
+    weight: 0.209
+    module: core.features.technical
+    function: ma_alignment
+    params: {long: 60, mid: 20, short: 5}
+    description: "均线多空排列 — 趋势强度连续评分"
+
+  momentum_20d:
+    enabled: true
+    weight: 0.07
+    module: core.features.technical
+    function: momentum
+    params: {window: 20}
+    description: "20日动量 — 短期趋势辅助"
+
+  amplitude_20d:
+    enabled: true
+    weight: 0.065
+    module: core.features.technical
+    function: amplitude
+    params: {window: 20}
+    description: "20日振幅 — 反转项，排异"
+
+  bollinger_position:
+    enabled: true
+    weight: 0.034
+    module: core.features.technical
+    function: bollinger_position
+    params: {num_std: 2, window: 20}
+    description: "布林位置 — 微量补足"
+
+  alpha_momentum_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: alpha_momentum
+    params: {window: 20}
+
+  atr_14:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: atr
+    params: {window: 14}
+
+  turnover_5d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: turnover
+    params: {window: 5}
+
+  turnover_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: turnover
+    params: {window: 20}
+
+  volume_ratio:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: volume_ratio
+    params: {window: 20}
+
+  amihud_illiq:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: amihud_illiq
+    params: {window: 20}
+
+  rsi_14:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: rsi
+    params: {window: 14}
+
+  macd_dif:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: macd_dif
+    params: {fast: 12, signal: 9, slow: 26}
+
+  sector_relative_strength_20d:
+    enabled: false
+    weight: 0.0
+    module: core.features.technical
+    function: sector_relative_strength
+    params: {window: 20}
+
+  # ── 基本面因子（仅 westock provider 有真数据，按 InfoPublDate PIT 对齐）──
+  # roe_ttm = 归母净利TTM / 期末净资产；revenue_yoy = 营收TTM 同比。
+  # 由 optimizer 搜索时启用（enabled: false / weight: 0 占位）。
+  roe_ttm:
+    enabled: false
+    weight: 0.0
+    module: fundamental
+    function: roe_ttm
+    description: "真 ROE（归母净利TTM/净资产，PIT 对齐）"
+
+  revenue_yoy:
+    enabled: false
+    weight: 0.0
+    module: fundamental
+    function: revenue_yoy
+    description: "营收同比（营收TTM 同比，PIT 对齐）"
+
+  # ── 阶段三扩充：A 类纯财报 + B 类估值（PB/PE/PEG 用历史 close×股本/PIT财报）──
+  net_profit_yoy:
+    enabled: false
+    weight: 0.0
+    module: fundamental
+    function: net_profit_yoy
+    description: "归母净利TTM 同比（PIT 对齐）"
+
+  gross_margin:
+    enabled: false
+    weight: 0.0
+    module: fundamental
+    function: gross_margin
+    description: "毛利率（毛利TTM/营收TTM，PIT 对齐）"
+
+  net_margin_ttm:
+    enabled: false
+    weight: 0.0
+    module: fundamental
+    function: net_margin_ttm
+    description: "净利率（归母净利TTM/营收TTM，PIT 对齐）"
+
+  pb:
+    enabled: false
+    weight: 0.0
+    module: fundamental
+    function: pb
+    description: "市净率（close×股本/PIT净资产）— 越低越好"
+
+  pe_ttm:
+    enabled: false
+    weight: 0.0
+    module: fundamental
+    function: pe_ttm
+    description: "市盈率TTM（close×股本/PIT净利TTM）— 越低越好"
+
+  peg:
+    enabled: false
+    weight: 0.0
+    module: fundamental
+    function: peg
+    description: "PEG（PE/净利同比）— 越低越好，亏损或负增长时中性"
+
