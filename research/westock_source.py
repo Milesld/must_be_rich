@@ -228,11 +228,12 @@ def _date_segments(start: date, end: date, seg_days: int = _SEG_DAYS):
     return segs
 
 
-def _fetch_one_segment(code: str, s: str, e: str) -> list[dict]:
+def _fetch_one_segment(code: str, s: str, e: str, max_retries: int = 2) -> list[dict]:
     """拉单只单段 K 线，返回标准化 row 列表（含 code）。带行情磁盘缓存。
 
-    密集请求会触发 westock 限流（返回 None）。策略：段间小延时 + 拉空重试 2 次
-    （退避 2s/4s）。注意次新股某段本就无数据，重试也是空——故重试次数克制（2 次）。
+    密集请求会触发 westock 限流（返回 None）。策略：段间小延时 + 拉空重试
+    max_retries 次（退避 3s/6s/9s...）。个股(277只)用默认 2 次求快；行业轮动
+    (十几条)可传更大值(如 4)确保拉全。注意空数组=该段真无数据(次新)，不重试。
     """
     cache_key = f"kline_{code}_{s}_{e}"
     cached = _cache_get(cache_key, ttl_days=3650)  # 历史行情不变，长期缓存
@@ -243,7 +244,7 @@ def _fetch_one_segment(code: str, s: str, e: str) -> list[dict]:
     time.sleep(0.15)  # 段间基础延时，降低触发限流概率
 
     data = None
-    for attempt in range(3):  # 首次 + 2 次重试
+    for attempt in range(max_retries + 1):  # 首次 + max_retries 次重试
         try:
             data = _run_westock_json(
                 ["kline", to_westock_code(code), "--period", "day",
@@ -255,8 +256,8 @@ def _fetch_one_segment(code: str, s: str, e: str) -> list[dict]:
             data = None
         if isinstance(data, list):
             break  # 拿到数组（含空数组=该段真无数据，不重试）
-        if attempt < 2:
-            time.sleep(2.0 * (attempt + 1))  # 限流退避 2s/4s
+        if attempt < max_retries:
+            time.sleep(3.0 * (attempt + 1))  # 限流退避 3s/6s/9s...
 
     # 非数组（None/str）= 限流或错误；空数组 = 该段真无数据（次新）
     if not isinstance(data, list):
@@ -286,12 +287,14 @@ def _fetch_one_segment(code: str, s: str, e: str) -> list[dict]:
     return rows
 
 
-def westock_kline(codes: list[str], start: date, end: date, batch: int | None = None):
+def westock_kline(codes: list[str], start: date, end: date, batch: int | None = None,
+                  max_retries: int = 2):
     """拉日 K 线（前复权），分段突破 244 条上限，合并为统一 DataFrame。
 
     单只 × 多段（每段 ≤ _SEG_DAYS 自然日），逐段拉再拼接去重。
     每只每段带磁盘缓存（历史行情不变，TTL 长），重跑秒出。
     batch 参数保留兼容签名，实际按单只分段拉（westock 单只查询更稳）。
+    max_retries：单段拉空重试次数。个股用默认 2（快）；行业轮动数据少可传 4（拉全）。
 
     Returns:
         DataFrame[code, trade_date, open, high, low, close, volume, amount, turnover]
@@ -304,7 +307,8 @@ def westock_kline(codes: list[str], start: date, end: date, batch: int | None = 
     total = len(codes)
     for idx, code in enumerate(codes):
         for (cs, ce) in segs:
-            rows.extend(_fetch_one_segment(code, cs.strftime("%Y-%m-%d"), ce.strftime("%Y-%m-%d")))
+            rows.extend(_fetch_one_segment(code, cs.strftime("%Y-%m-%d"),
+                                           ce.strftime("%Y-%m-%d"), max_retries=max_retries))
         if (idx + 1) % 25 == 0 or idx + 1 == total:
             logger.info("  westock 行情进度: %d/%d 只（每只 %d 段）", idx + 1, total, len(segs))
 

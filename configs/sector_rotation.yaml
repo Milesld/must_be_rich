@@ -1,0 +1,47 @@
+# ══════════════════════════════════════════════════════════
+# 行业轮动配置 — 多因子行业打分 + 月度选 top-K 重仓
+# 数据源：westock（中证/CS 行业指数日线，绕开 akshare 限流）
+# 与个股选股链路完全独立（research/sector_rotation.py）
+# ══════════════════════════════════════════════════════════
+
+backtest:
+  start_date: '2023-01-01'
+  end_date: '2025-12-31'
+  validate_start: '2026-01-01'   # 可选：留出验证区间（默认跑 start~end 完整区间）
+  validate_end: '2026-06-25'
+  initial_capital: 200000
+
+# 行业指数池（code 可配可扩；已验证 westock kline 均能拉到 2023 起日线）
+# 供应商混杂(中证 sz399/sh000、CS cs93)不影响动量排名（比各自涨跌幅）。
+sectors:
+  - {code: sz399986, name: 中证银行}
+  - {code: sz399933, name: 中证医药}
+  - {code: sh000807, name: 食品饮料}
+  - {code: sh000819, name: 有色金属}
+  - {code: sz399998, name: 中证煤炭}
+  - {code: sz399971, name: 中证传媒}
+  - {code: sh000949, name: 中证农业}
+  - {code: sz399440, name: 国证钢铁}     # 原 cs930606 westock 不认(search 确认 cs 前缀拉不到)，换国证钢铁(已验证 rows=36)
+  - {code: sh000812, name: 细分机械}
+  - {code: sh000935, name: 中证信息}     # 原 cs930651 CS计算机 换；中证信息技术(计算机/信息一级行业宽基，语义最贴合，史长)
+  - {code: sz399393, name: 国证地产}     # 原 cs931775 换；全指房地产 sz399948/sh000952 均拉不到，仅国证地产可用
+  - {code: sz399996, name: 智能家居}     # 原 cs931241 换；智能家居(含家电+智能硬件)，家电最接近的可拉指数
+
+rotation:
+  top_k: 3                # 每月重仓行业数
+  rebalance: monthly
+  cost_bps: 10            # 单边换手成本（基点，10=0.1%）；0=无摩擦
+
+# 行业多因子打分（作用在行业指数，非个股）。window 单位=交易日。
+# inverse: true 表示越低越好（如低波动优先）。
+factors:
+  momentum_6m:   {weight: 0.5, window: 120}
+  momentum_3m:   {weight: 0.2, window: 60}
+  volatility_3m: {weight: 0.2, window: 60, inverse: true}
+  rel_strength:  {weight: 0.1, window: 120}
+
+# 市场状态控总仓位（可选）。enabled: false 时满仓轮动。
+regime:
+  enabled: false
+
+benchmark: sh000300       # 相对基准（沪深300），算超额年化/信息比率
