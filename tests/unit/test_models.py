@@ -9,14 +9,19 @@ import pytest
 # 模型层依赖 sklearn（core.models.long_term 等）；缺失时整体跳过。
 pytest.importorskip("sklearn", reason="sklearn 未安装（模型层依赖）")
 
-# 检测 lightgbm 是否可用（网络受限环境可能未安装）
+# 检测 lightgbm 是否可用：
+# - ImportError：包未安装（网络受限环境）
+# - OSError：包已装但动态库加载失败（macOS 缺 libomp.dylib，
+#   修复：brew install libomp 或 conda install llvm-openmp）
 try:
     import lightgbm  # noqa: F401
     _HAS_LIGHTGBM = True
-except ImportError:
+except (ImportError, OSError):
     _HAS_LIGHTGBM = False
 
-requires_lgb = pytest.mark.skipif(not _HAS_LIGHTGBM, reason="lightgbm 未安装")
+requires_lgb = pytest.mark.skipif(
+    not _HAS_LIGHTGBM, reason="lightgbm 不可用（未安装或缺 libomp）",
+)
 
 
 def _make_random_data(n_samples: int = 300, n_features: int = 10) -> tuple[pd.DataFrame, pd.Series, pd.Series]:

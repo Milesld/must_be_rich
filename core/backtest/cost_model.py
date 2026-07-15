@@ -151,7 +151,9 @@ class TransactionCostModel:
     ) -> Decimal:
         """滑点估算：按流动性分层。
 
-        不实际扣除（非真实成本），用于评估策略在真实市场中的可行性。
+        ★ 口径说明：滑点计入 CostBreakdown.total，回测引擎按 total 扣现金，
+        即回测收益已包含滑点成本（保守口径）。它与佣金/印花税的区别仅在于
+        是估算值而非交易所实收，报告中单列展示以便核对。
         """
         if market_cap is not None:
             cap = _to_d(market_cap)

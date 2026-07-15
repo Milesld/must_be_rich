@@ -76,17 +76,28 @@ def _merge_financials(
                 data[col] = np.nan
         return data
     # ★ 用 merge_asof 对齐：对每行行情取最近一次已公告的财报，避免多对多行爆炸
-    # 前提：fin 需按 (code, announce_date) 排序
-    data = data.sort_values(["code", "trade_date"])
-    fin = fin.sort_values(["code", "announce_date"]) if "announce_date" in fin.columns else fin
+    # merge_asof 要求两侧 key 同为 datetime64：trade_date/announce_date/report_date
+    # 可能是 date 对象（object dtype），统一转成 datetime64 的临时 key 列再合并
+    right_key = "announce_date" if "announce_date" in fin.columns else "report_date"
+    data = data.copy()
+    fin = fin.copy()
+    orig_index = data.index
+    data["_asof_dt"] = pd.to_datetime(data["trade_date"])
+    fin["_asof_dt"] = pd.to_datetime(fin[right_key])
+    # merge_asof 要求 on 列全局有序；merge 后按 _orig_pos 恢复原行序，
+    # 保证因子 Series 与输入 data 按 index 一一对应
+    data["_orig_pos"] = range(len(data))
+    data = data.sort_values("_asof_dt")
+    fin = fin.sort_values("_asof_dt")
     merged = pd.merge_asof(
         data, fin,
         by="code",
-        left_on="trade_date",
-        right_on="announce_date" if "announce_date" in fin.columns else "report_date",
+        on="_asof_dt",
         direction="backward",
         suffixes=("", "_fin"),
     )
+    merged = merged.sort_values("_orig_pos").drop(columns=["_asof_dt", "_orig_pos"])
+    merged.index = orig_index
     return merged
 
 

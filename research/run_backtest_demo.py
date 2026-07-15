@@ -1733,7 +1733,7 @@ def _print_rebalance_history(result, raw_data: dict) -> None:
                 print(f"    {t['code']} {name:<10s}  "
                       f"{int(t['filled_shares']):>7d}股 @ ¥{t['filled_price']:>8.2f}  "
                       f"成交 ¥{amount:>12,.0f}  "
-                      f"费 ¥{real_fee:.2f} + 滑(估)¥{slip:.2f}  "
+                      f"费 ¥{real_fee:.2f} + 滑¥{slip:.2f}(已扣)  "
                       f"({_fmt(cost,'commission')}, {_fmt(cost,'stamp_duty')}, {_fmt(cost,'transfer_fee')}){pnl_str}")
                 total_sell += amount
                 total_pnl += pnl
@@ -1750,7 +1750,7 @@ def _print_rebalance_history(result, raw_data: dict) -> None:
                 print(f"    {t['code']} {name:<10s}  "
                       f"{int(t['filled_shares']):>7d}股 @ ¥{t['filled_price']:>8.2f}  "
                       f"成交 ¥{amount:>12,.0f}  "
-                      f"费 ¥{real_fee:.2f} + 滑(估)¥{slip:.2f}  "
+                      f"费 ¥{real_fee:.2f} + 滑¥{slip:.2f}(已扣)  "
                       f"(佣{_fmt(cost,'commission')} 过{_fmt(cost,'transfer_fee')})")
                 total_buy += amount
 
@@ -1785,7 +1785,10 @@ def _fmt(cost_dict, key: str) -> str:
 
 
 def _real_cost(cost_dict) -> float:
-    """实际交易费用（佣金+印花税+过户费），不含滑点估算。"""
+    """交易所实收费用（佣金+印花税+过户费），不含滑点。
+
+    注意：滑点同样已从回测现金中扣除（engine 按 CostBreakdown.total 扣），
+    此处拆开只是为了展示核对。"""
     if not isinstance(cost_dict, dict):
         return 0.0
     return (cost_dict.get("commission", 0) +
@@ -1794,7 +1797,7 @@ def _real_cost(cost_dict) -> float:
 
 
 def _slip(cost_dict) -> float:
-    """滑点估算值（非实际费用，仅用于评估策略可行性）。"""
+    """滑点估算值。★已计入成本从回测现金中扣除（保守口径），并非仅供参考。"""
     if not isinstance(cost_dict, dict):
         return 0.0
     return cost_dict.get("slippage_est", 0)

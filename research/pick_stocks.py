@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %
 logger = logging.getLogger("picker")
 
 from research.run_backtest_demo import (
-    load_config, _enabled_factors, _get_codes,
+    load_config, _enabled_factors, _get_codes, _provider,
     _load_real_data, _load_overseas_data,
     _build_market_wide_from_pool, _build_feature_loader,
     _build_monthly_universe, ConfigDrivenStrategy,
@@ -48,8 +48,16 @@ def pick_stocks(config_path: str, show_n: int, buy_n: int, budget: float) -> lis
         return []
 
     codes = _get_codes(config)
-    # 不加载基本面数据：基本面因子已被优化器 ALL_NO_DATA 过滤，且 ROE 为伪造值
-    financials: dict = {}
+    # ★ 与回测同一套打分数据（路线图 1.6）：westock 模式加载真财报
+    # （PIT 对齐的 ROE/营收同比）+ 总股本（PB/PE/PEG 用），保证
+    # 「回测的策略 = 实盘选股的策略」。其它 provider 无真财报，保持为空。
+    if _provider(config) == "westock":
+        from research.westock_source import westock_financials, westock_total_shares
+        financials: dict = westock_financials(codes)
+        total_shares: dict = westock_total_shares(codes)
+    else:
+        financials = {}
+        total_shares = {}
     start_date = date.fromisoformat(config["backtest"]["start_date"])
     overseas_data = _load_overseas_data(start_date, date.today())
     market_wide_data = _build_market_wide_from_pool(raw_data)
@@ -57,7 +65,8 @@ def pick_stocks(config_path: str, show_n: int, buy_n: int, budget: float) -> lis
     monthly_universe = _build_monthly_universe(raw_data, config)
     feature_loader = _build_feature_loader(raw_data, config, financials,
                                            overseas_data, market_wide_data,
-                                           monthly_universe=monthly_universe)
+                                           monthly_universe=monthly_universe,
+                                           total_shares=total_shares)
 
     # ── 找最近有数据的交易日 ──
     from core.common.calendar import get_calendar
