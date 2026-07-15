@@ -133,12 +133,20 @@ class TradingCalendar:
     # —— 内部方法 ——
 
     def _load(self, force_refresh: bool = False, offline_ok: bool = True) -> None:
-        """加载交易日历：先试网络拉取（5秒超时），失败则用缓存或估算。"""
-        # 1. 缓存存在且不强制刷新 → 直接用
+        """加载交易日历：先试网络拉取（5秒超时），失败则用缓存或估算。
+
+        ★ 估算日历（周一至五，节假日全算交易日）仅作离线兜底，
+        缓存中以 estimated 标记区分：估算缓存每次初始化都优先尝试
+        联网替换为真实日历，防止一次离线运行永久污染后续所有回测。
+        """
+        # 1. 真实日历缓存存在且不强制刷新 → 直接用；
+        #    估算缓存则跳过此分支，继续尝试联网获取真实日历
         if not force_refresh and _CACHE_FILE.exists():
             try:
-                self._load_from_cache()
-                return
+                if not self._cache_is_estimated():
+                    self._load_from_cache()
+                    return
+                logger.info("本地缓存为估算日历（含节假日误差），尝试联网替换为真实日历")
             except Exception:
                 logger.warning("缓存损坏，尝试网络拉取")
 
@@ -160,20 +168,28 @@ class TradingCalendar:
         t.join(timeout=5.0)
 
         if net_result:
-            # 网络拉取成功 → 保存缓存
-            self._save_to_cache()
+            # 网络拉取成功 → 保存缓存（真实日历，estimated=False）
+            self._save_to_cache(estimated=False)
             return
 
-        # 3. 网络失败 → 回退
+        # 3. 网络失败 → 回退（估算缓存也可用：过节假日误差 < 无日历）
         if net_error:
             logger.info("交易日历网络拉取超时/失败(%s)，使用本地缓存或估算", net_error[0][:80])
         if _CACHE_FILE.exists():
-            self._load_from_cache()
-            return
+            try:
+                if self._cache_is_estimated():
+                    logger.warning(
+                        "正在使用估算日历缓存（节假日被当作交易日），"
+                        "回测结果在节假日附近会失真。联网后重跑将自动替换为真实日历。"
+                    )
+                self._load_from_cache()
+                return
+            except Exception:
+                logger.warning("缓存损坏，回退估算日历")
         if offline_ok:
             logger.info("无缓存，使用估算日历（周一至周五）")
             self._build_estimated_calendar()
-            self._save_to_cache()
+            self._save_to_cache(estimated=True)
         else:
             raise RuntimeError(
                 "交易日历不可用：无本地缓存且 offline_ok=False。"
@@ -185,6 +201,25 @@ class TradingCalendar:
         df = pd.read_parquet(_CACHE_FILE)
         self._trading_days = {d.date() for d in pd.to_datetime(df["trade_date"])}
         self._trading_days_sorted = sorted(self._trading_days)
+
+    @staticmethod
+    def _cache_is_estimated() -> bool:
+        """判断缓存是否为估算日历（由 _save_to_cache 的 estimated 列标记）。
+
+        旧版缓存无 estimated 列：用启发式兜底——真实 A 股日历不含春节
+        （检查若干年份的大年初一附近是否被标为交易日）。
+        """
+        try:
+            df = pd.read_parquet(_CACHE_FILE)
+        except Exception:
+            return False
+        if "estimated" in df.columns:
+            return bool(df["estimated"].iloc[0])
+        # 旧缓存启发式：2024-02-12（春节初三，周一）绝不可能是真实交易日
+        days = {d.date() for d in pd.to_datetime(df["trade_date"])}
+        from datetime import date as _d
+        spring_festival_probes = [_d(2024, 2, 12), _d(2025, 1, 29), _d(2023, 1, 24)]
+        return any(p in days for p in spring_festival_probes)
 
     def _fetch_from_akshare(self) -> None:
         """从 akshare 拉取A股交易日历（仅在 force_refresh=True 时调用）。"""
@@ -220,12 +255,18 @@ class TradingCalendar:
             len(self._trading_days_sorted),
         )
 
-    def _save_to_cache(self) -> None:
-        """保存到本地 Parquet 缓存。"""
+    def _save_to_cache(self, estimated: bool = False) -> None:
+        """保存到本地 Parquet 缓存。
+
+        Args:
+            estimated: 是否为估算日历。估算缓存会在下次初始化时优先
+                       尝试联网替换，不会永久生效。
+        """
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         df = pd.DataFrame({"trade_date": self._trading_days_sorted})
+        df["estimated"] = estimated
         df.to_parquet(_CACHE_FILE, index=False)
-        logger.debug("交易日历已缓存到 %s", _CACHE_FILE)
+        logger.debug("交易日历已缓存到 %s (estimated=%s)", _CACHE_FILE, estimated)
 
 
 # —— 全局单例 ——

@@ -310,12 +310,88 @@ def _fetch_one_segment(code: str, s: str, e: str, max_retries: int = 2) -> list[
     return rows
 
 
+def _board_price_limit(code: str) -> float:
+    """按代码前缀取板块涨跌幅（用于段缝连续性阈值）。"""
+    if code.startswith(("688", "300", "301")):
+        return 0.20
+    if code.startswith(("92", "83", "87", "88", "43")):
+        return 0.30
+    return 0.10
+
+
+def _seams_ok(code: str, seg_rows: list) -> bool:
+    """校验相邻缓存段边界处的价格连续性。
+
+    ★ qfq（前复权）价格以「拉取当天」为基准回算：除权除息后基准改变，
+    旧缓存段与新拉段的复权基线不一致 → 段缝处出现现实中不可能的假跳空。
+    相邻交易日 close 涨跌幅超过板块涨跌停限制即视为基线错位
+    （阈值 = 板块限制 × 1.5 + 2%，容忍复牌股的真实跳空边缘情况）。
+
+    残留：小额分红造成的基线错位（<涨跌幅限制）无法用此法检出，
+    但其对因子的影响也同量级地小。根治方案见路线图第 6 阶段（本地数据仓
+    存不复权价+复权因子）。
+    """
+    limit = _board_price_limit(code)
+    threshold = limit * 1.5 + 0.02
+    prev_close = None
+    for seg in seg_rows:
+        if not seg:
+            continue
+        first_close = float(seg[0].get("close", 0) or 0)
+        if prev_close and first_close > 0:
+            jump = abs(first_close / prev_close - 1.0)
+            if jump > threshold:
+                logger.warning(
+                    "westock %s 段缝价格跳变 %.1f%%（阈值 %.1f%%），疑似 qfq 复权基线"
+                    "错位（除权后旧缓存失效）", code, jump * 100, threshold * 100,
+                )
+                return False
+        last_close = float(seg[-1].get("close", 0) or 0)
+        if last_close > 0:
+            prev_close = last_close
+    return True
+
+
+def _purge_kline_cache(code: str) -> int:
+    """删除单只股票的全部 kline 段缓存，返回删除文件数。"""
+    n = 0
+    try:
+        for p in _CACHE_DIR.glob(f"kline_{code}_*.json"):
+            p.unlink()
+            n += 1
+    except Exception as e:
+        logger.warning("westock 清理 %s kline 缓存失败: %s", code, e)
+    return n
+
+
+def _fetch_code_segments(code: str, segs: list, max_retries: int) -> list[dict]:
+    """拉单只全部分段（含缓存），段缝连续性校验失败则废弃缓存重拉一次。"""
+    seg_rows = [
+        _fetch_one_segment(code, cs.strftime("%Y-%m-%d"), ce.strftime("%Y-%m-%d"),
+                           max_retries=max_retries)
+        for (cs, ce) in segs
+    ]
+    if not _seams_ok(code, seg_rows):
+        n = _purge_kline_cache(code)
+        logger.info("westock %s 废弃 %d 个缓存段，重新拉取全历史", code, n)
+        seg_rows = [
+            _fetch_one_segment(code, cs.strftime("%Y-%m-%d"), ce.strftime("%Y-%m-%d"),
+                               max_retries=max_retries)
+            for (cs, ce) in segs
+        ]
+        if not _seams_ok(code, seg_rows):
+            # 重拉后仍不连续：真实复牌跳空或数据源本身异常，保留数据但显式告警
+            logger.warning("westock %s 重拉后段缝仍不连续（可能为真实复牌跳空），保留数据", code)
+    return [r for seg in seg_rows for r in seg]
+
+
 def westock_kline(codes: list[str], start: date, end: date, batch: int | None = None,
                   max_retries: int = 2):
     """拉日 K 线（前复权），分段突破 244 条上限，合并为统一 DataFrame。
 
     单只 × 多段（每段 ≤ _SEG_DAYS 自然日），逐段拉再拼接去重。
-    每只每段带磁盘缓存（历史行情不变，TTL 长），重跑秒出。
+    每只每段带磁盘缓存；★ 拼接时校验段缝价格连续性，检出 qfq 复权基线
+    错位（除权后旧缓存失效）则自动废弃该股缓存重拉（见 _seams_ok）。
     batch 参数保留兼容签名，实际按单只分段拉（westock 单只查询更稳）。
     max_retries：单段拉空重试次数。个股用默认 2（快）；行业轮动数据少可传 4（拉全）。
 
@@ -329,9 +405,7 @@ def westock_kline(codes: list[str], start: date, end: date, batch: int | None = 
     rows: list[dict] = []
     total = len(codes)
     for idx, code in enumerate(codes):
-        for (cs, ce) in segs:
-            rows.extend(_fetch_one_segment(code, cs.strftime("%Y-%m-%d"),
-                                           ce.strftime("%Y-%m-%d"), max_retries=max_retries))
+        rows.extend(_fetch_code_segments(code, segs, max_retries))
         if (idx + 1) % 25 == 0 or idx + 1 == total:
             logger.info("  westock 行情进度: %d/%d 只（每只 %d 段）", idx + 1, total, len(segs))
 
