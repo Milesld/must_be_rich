@@ -35,6 +35,18 @@ def _code_to_board_id(code: str) -> str:
     return "sse_main"
 
 
+# 板块默认涨跌幅（与 configs/boards/*.yaml 一致）。
+# 之前无配置时所有板块统一按 ±10% 检查，创业板/科创板合法的 10~20% 波动
+# 会被误拒单，系统性扭曲回测。内置默认表保证「不传配置」时行为也正确。
+_DEFAULT_PRICE_LIMITS: dict[str, float] = {
+    "sse_main": 0.10,
+    "szse_main": 0.10,
+    "sse_star": 0.20,
+    "szse_gem": 0.20,
+    "bse": 0.30,
+}
+
+
 @dataclass
 class ConstraintCheckResult:
     """约束检查结果。"""
@@ -92,7 +104,7 @@ class TradingConstraints:
         for code, row in daily_data.items():
             board = _code_to_board_id(code)
             rules = self._boards.get(board, {})
-            price_limit = rules.get("price_limit", 0.10)
+            price_limit = rules.get("price_limit", _DEFAULT_PRICE_LIMITS.get(board, 0.10))
             is_st = row.get("is_st", False)
             is_suspended = row.get("is_suspended", False)
             pre_close = row.get("pre_close", 0.0)
@@ -113,15 +125,18 @@ class TradingConstraints:
             if is_suspended:
                 self._suspended_codes.add(code)
 
-            # 封板判断依据：成交量接近0且价格在涨跌停价位
-            vol = row.get("volume", 0)
+            # 封板判断依据：收盘价 ≈ 涨/跌停价（容差 0.2%）。
+            # 旧逻辑要求 volume<=0 才认定封板，但日线上涨停日也有集合竞价成交，
+            # volume 几乎不可能为 0 → 检查形同虚设，回测可在一字板照常买卖，
+            # 系统性高估动量策略。改为收盘价贴板即视为封板（保守但更接近现实：
+            # 收盘仍封死的板，尾盘排队买入大概率排不到）。
             close = row.get("close", pre_close)
             is_sealed_up = False
             is_sealed_down = False
-            if vol <= 0 and close > 0:
-                if abs(close - limit_up) / limit_up < 0.001:
+            if close > 0 and pre_close > 0:
+                if limit_up > 0 and abs(close - limit_up) / limit_up < 0.002:
                     is_sealed_up = True
-                elif abs(close - limit_down) / limit_down < 0.001:
+                elif limit_down > 0 and abs(close - limit_down) / limit_down < 0.002:
                     is_sealed_down = True
             self._sealed_status[code] = (is_sealed_up, is_sealed_down)
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -163,6 +164,31 @@ class OHLCFillSimulator:
         return fill_price, intent.shares
 
 
+# ── 板块配置加载 ────────────────────────────────
+
+def _load_boards_config() -> dict | None:
+    """从 configs/boards/*.yaml 加载板块规则（涨跌幅/整手/价格笼子）。
+
+    返回 {board_id: rules_dict}；目录缺失或解析失败返回 None
+    （TradingConstraints/ShareRounder 会回退到内置默认表）。
+    """
+    boards_dir = Path(__file__).resolve().parent.parent.parent / "configs" / "boards"
+    if not boards_dir.is_dir():
+        return None
+    out: dict[str, dict] = {}
+    try:
+        import yaml
+        for p in sorted(boards_dir.glob("*.yaml")):
+            with open(p) as f:
+                rules = yaml.safe_load(f)
+            if isinstance(rules, dict):
+                out[rules.get("board_id", p.stem)] = rules
+    except Exception as e:
+        logger.warning("加载 configs/boards 失败，回退内置默认板块规则: %s", e)
+        return None
+    return out or None
+
+
 # ── 回测引擎 ────────────────────────────────────
 
 class BacktestEngine:
@@ -187,6 +213,7 @@ class BacktestEngine:
         fill_simulator: FillSimulator | None = None,
         commission_rate: float = 0.00015,
         stamp_duty_rate: float = 0.0005,
+        board_config: dict | None = None,
     ) -> None:
         """初始化回测引擎。
 
@@ -198,6 +225,8 @@ class BacktestEngine:
             fill_simulator: 自定义撮合模拟器（默认 ClosePriceFillSimulator）。
             commission_rate: 佣金率（覆盖系统默认值）。
             stamp_duty_rate: 印花税率（覆盖系统默认值）。
+            board_config: 板块规则 dict（{board_id: {price_limit, min_shares, ...}}）。
+                          优先级：显式传入 > config.boards > configs/boards/*.yaml 自动加载。
         """
         self.start_date = start_date
         self.end_date = end_date
@@ -205,7 +234,14 @@ class BacktestEngine:
         self.config = config
 
         # 子系统
-        board_cfg = getattr(config, "boards", None) if config else None
+        # 板块规则：历史 bug——调用方（run_backtest_demo/factor_optimizer）从不传
+        # config，导致 configs/boards/*.yaml 从未生效，创业板/科创板被按 ±10%
+        # 检查涨跌停而误拒单。现在无配置时自动从 configs/boards/ 加载。
+        board_cfg = board_config
+        if board_cfg is None and config is not None:
+            board_cfg = getattr(config, "boards", None)
+        if board_cfg is None:
+            board_cfg = _load_boards_config()
         self.cost_model = TransactionCostModel()
         self.constraints = TradingConstraints(board_cfg)
         self.rounder = ShareRounder(board_cfg)

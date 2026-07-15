@@ -72,6 +72,13 @@ def _run_westock_json(args: list[str], timeout: float = 120.0):
         obj = json.loads(out)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"westock 输出非 JSON: {' '.join(args)}\n{out[:300]}") from e
+    # 显式识别错误响应 {success: false, error: {...}}，避免下游把它当数据迭代
+    if isinstance(obj, dict) and obj.get("success") is False:
+        err = obj.get("error") or {}
+        raise RuntimeError(
+            f"westock 返回错误 [{err.get('code', '?')}]: "
+            f"{err.get('message', '未知错误')} ({' '.join(args)})"
+        )
     # 下钻 {success, data} 包装
     if isinstance(obj, dict) and "data" in obj:
         return obj["data"]
@@ -129,8 +136,24 @@ def westock_industry_cons(board_codes: list[str]) -> list[str]:
             cons = cached
             src = "缓存"
         else:
-            data = _run_westock_json(["sector", "constituent", board])
-            cons = [_strip_prefix(str(r["code"])) for r in (data or []) if r.get("code")]
+            try:
+                data = _run_westock_json(["sector", "constituent", board])
+                cons = [_strip_prefix(str(r["code"])) for r in (data or [])
+                        if isinstance(r, dict) and r.get("code")]
+            except RuntimeError as ex:
+                # 联网失败时回退过期缓存（成分月度慢变，过期数据远好于中断）
+                stale = _cache_get(f"cons_{board}", ttl_days=365)
+                if stale:
+                    logger.warning("westock 板块 %s 联网失败(%s)，回退过期缓存(%d只)",
+                                   board, ex, len(stale))
+                    cons = stale
+                    src = "过期缓存"
+                    for c in cons:
+                        if c not in seen:
+                            codes.append(c)
+                            seen.add(c)
+                    continue
+                raise
             if not cons:
                 logger.warning("westock 板块 %s 返回空成分", board)
                 raise RuntimeError(f"westock 板块 {board} 成分为空，候选宇宙不完整")

@@ -126,11 +126,118 @@ class TestLimitSealed:
         assert not passed, "涨停封板应拒绝买单"
         assert "涨停封板" in reason
 
+    def test_limit_up_sealed_with_volume_rejects_buy(self, tc: TradingConstraints) -> None:
+        """回归：涨停日成交量>0（日线常态），收盘贴板仍应视为封板拒买。
+
+        旧逻辑要求 volume<=0 才认定封板，而日线数据上涨停日也有集合竞价
+        成交量，导致封板检查形同虚设、回测可在一字板买入。
+        """
+        data = {
+            "000888": {
+                "pre_close": 10.0,
+                "close": 11.0,        # = 涨停价
+                "volume": 3_000_000,  # 有成交量（现实情况）
+                "is_st": False,
+                "is_suspended": False,
+            },
+        }
+        tc.update_daily_info(data)
+
+        passed, reason = tc.check_limit_sealed("000888", "buy")
+        assert not passed, "有成交量但收盘贴涨停价，仍应认定封板拒买"
+        # 卖出方向不受涨停封板限制
+        passed_sell, _ = tc.check_limit_sealed("000888", "sell")
+        assert passed_sell
+
+    def test_limit_down_sealed_rejects_sell(self, tc: TradingConstraints) -> None:
+        """跌停封板（收盘≈跌停价）→ 卖单被拒。"""
+        data = {
+            "000888": {
+                "pre_close": 10.0,
+                "close": 9.0,         # = 跌停价 10×0.9
+                "volume": 2_000_000,
+                "is_st": False,
+                "is_suspended": False,
+            },
+        }
+        tc.update_daily_info(data)
+
+        passed, reason = tc.check_limit_sealed("000888", "sell")
+        assert not passed, "跌停封板应拒绝卖单"
+        assert "跌停封板" in reason
+
     def test_normal_no_sealed(self, tc: TradingConstraints, daily_data: dict) -> None:
         tc.update_daily_info(daily_data)
 
         passed, _ = tc.check_limit_sealed("600519", "buy")
         assert passed
+
+
+class TestBoardDefaultPriceLimits:
+    """回归：无板块配置时，创业板/科创板/北交所应按各自涨跌幅检查。
+
+    历史 bug：TradingConstraints(None) 时所有板块统一按 ±10%，
+    创业板/科创板合法的 10~20% 波动被误拒单，扭曲全部回测结果。
+    """
+
+    def test_gem_15pct_move_allowed(self, tc: TradingConstraints) -> None:
+        """创业板（300）±20%：+15% 的价格应通过。"""
+        data = {"300750": {"pre_close": 100.0, "close": 115.0, "volume": 1_000_000,
+                            "is_st": False, "is_suspended": False}}
+        tc.update_daily_info(data)
+        passed, reason = tc.check_price_limit("300750", 115.0)
+        assert passed, f"创业板 +15% 合法波动被误拒: {reason}"
+
+    def test_gem_21pct_rejected(self, tc: TradingConstraints) -> None:
+        """创业板 +21% 超过 ±20% 上限应拒绝。"""
+        data = {"300750": {"pre_close": 100.0, "close": 119.0, "volume": 1_000_000,
+                            "is_st": False, "is_suspended": False}}
+        tc.update_daily_info(data)
+        passed, _ = tc.check_price_limit("300750", 121.0)
+        assert not passed
+
+    def test_star_19pct_move_allowed(self, tc: TradingConstraints) -> None:
+        """科创板（688）±20%：+19% 的价格应通过。"""
+        data = {"688981": {"pre_close": 50.0, "close": 59.5, "volume": 1_000_000,
+                            "is_st": False, "is_suspended": False}}
+        tc.update_daily_info(data)
+        passed, reason = tc.check_price_limit("688981", 59.5)
+        assert passed, f"科创板 +19% 合法波动被误拒: {reason}"
+
+    def test_bse_25pct_move_allowed(self, tc: TradingConstraints) -> None:
+        """北交所（920）±30%：+25% 的价格应通过。"""
+        data = {"920139": {"pre_close": 10.0, "close": 12.5, "volume": 500_000,
+                            "is_st": False, "is_suspended": False}}
+        tc.update_daily_info(data)
+        passed, reason = tc.check_price_limit("920139", 12.5)
+        assert passed, f"北交所 +25% 合法波动被误拒: {reason}"
+
+    def test_main_board_still_10pct(self, tc: TradingConstraints) -> None:
+        """主板仍是 ±10%：+12% 应拒绝。"""
+        data = {"600519": {"pre_close": 1000.0, "close": 1090.0, "volume": 1_000_000,
+                            "is_st": False, "is_suspended": False}}
+        tc.update_daily_info(data)
+        passed, _ = tc.check_price_limit("600519", 1120.0)
+        assert not passed
+
+
+class TestEngineLoadsBoardsConfig:
+    """回归：BacktestEngine 不传 config 时也应加载 configs/boards 板块规则。"""
+
+    def test_engine_auto_loads_boards(self) -> None:
+        from datetime import date as _date
+        from core.backtest.engine import BacktestEngine
+
+        engine = BacktestEngine(
+            start_date=_date(2024, 1, 2),
+            end_date=_date(2024, 1, 10),
+            initial_capital=1_000_000,
+        )
+        boards = engine.constraints._boards
+        assert boards, "引擎应自动加载 configs/boards/*.yaml"
+        assert boards.get("szse_gem", {}).get("price_limit") == 0.20
+        assert boards.get("sse_star", {}).get("price_limit") == 0.20
+        assert boards.get("bse", {}).get("price_limit") == 0.30
 
 
 class TestCheckAll:
