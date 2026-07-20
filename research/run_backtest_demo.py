@@ -586,13 +586,35 @@ def _load_real_data(config: dict) -> tuple[dict[date, dict], str]:
     # ── westock 数据源（绕开 akshare 限流）──
     if provider == "westock":
         from research.westock_source import westock_kline
-        try:
-            raw_df = westock_kline(codes, start, end)
-        except Exception as ex:
-            logger.warning("westock 数据拉取失败: %s", ex)
-            return {}, str(ex)
-        if raw_df is None or len(raw_df) == 0:
+        # ★ warehouse-first（路线图第 6 阶段）：本地数据仓覆盖的代码直接读
+        #   parquet（快且不受限流），只对未覆盖的代码联网。仓库由
+        #   scripts/update_data.py 每日增量维护。
+        from research import warehouse as _wh
+        wh_meta = _wh.load_meta()
+        local_codes = [c for c in codes if _wh.warehouse_covers(c, start, end, wh_meta)]
+        remote_codes = [c for c in codes if c not in set(local_codes)]
+        frames = []
+        if local_codes:
+            local_df = _wh.read_kline_many(local_codes, start, end)
+            if local_df is not None:
+                frames.append(local_df)
+            logger.info("westock 数据仓命中 %d/%d 只（联网仅 %d 只）",
+                        len(local_codes), len(codes), len(remote_codes))
+        if remote_codes:
+            try:
+                remote_df = westock_kline(remote_codes, start, end)
+            except Exception as ex:
+                if not frames:
+                    logger.warning("westock 数据拉取失败: %s", ex)
+                    return {}, str(ex)
+                logger.warning("westock 联网部分失败（%s），仅用数据仓的 %d 只",
+                               ex, len(local_codes))
+                remote_df = None
+            if remote_df is not None and len(remote_df) > 0:
+                frames.append(remote_df)
+        if not frames:
             return {}, "westock 返回空数据"
+        raw_df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
         out: dict[date, dict] = {}
         for _, row in raw_df.iterrows():
             td = row["trade_date"]
