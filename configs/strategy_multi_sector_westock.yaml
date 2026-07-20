@@ -1,0 +1,81 @@
+# ══════════════════════════════════════════════════════════════
+# 策略配置 — 扩宇宙模板（路线图第 7 阶段）
+#
+# 与单行业池的区别：
+# 1. 多板块并集宇宙（pool_size 100）——横截面从 ~30 只扩到上百只，
+#    排名统计意义显著增强；
+# 2. top_n 从 3 扩到 20 分散持仓（top_n=3 单票风险大到任何因子
+#    alpha 都会被噪声淹没）；
+# 3. 组合约束开启：单票权重 ≤10%、单行业 ≤6 只（≈30% 敞口）、
+#    rank buffer 40 控换手（排名跌出 40 才卖，避免在噪声上反复交易）；
+# 4. 因子做行业+市值双重中性化（排名的是纯因子暴露）。
+#
+# ★ industries 板块码需要用 westock CLI 核对（限流恢复后）：
+#     node westock-data/scripts/index.js search <行业名> --type sector
+#   已核对的码：pt01801081=申万二级-半导体、pt01801780=申万一级-银行。
+#   下方默认只启用这两个已验证板块；按需追加其它申万一级码后再跑。
+# ══════════════════════════════════════════════════════════════
+
+backtest:
+  start_date: '2023-01-01'
+  end_date: '2025-12-31'
+  initial_capital: 200000
+
+data_source:
+  provider: westock
+  lookback_days: 400
+  universe:
+    mode: dynamic
+    industries:                   # 申万板块码并集（先用已验证的两个，逐步扩）
+      - "pt01801081"              # 半导体（申万二级，已验证）
+      - "pt01801780"              # 银行（申万一级，已验证）
+    pool_size: 100                # 扩宇宙：每月候选上限（按日均成交额取 top）
+    min_listing_months: 12
+    min_avg_amount: 200000000
+
+strategy:
+  top_n: 20                       # 分散持仓（路线图 2.2）
+  min_shares: 100
+  optimizer: equal_weight
+  rebalance_frequency: monthly
+  # ── 组合约束（路线图 2.4，第 7 阶段新增）──
+  max_weight_per_stock: 0.10      # 单票权重上限（等权 1/20=5% 已低于上限；防 top_n 调小后集中）
+  max_per_sector: 6               # 单行业最多 6 只 ≈ 30% 敞口上限
+  rank_buffer: 40                 # 已持有排名 ≤40 保留（换手控制；null=关闭）
+  # ── 因子中性化（路线图 2.2，复用 core/features/neutralizer）──
+  neutralize:
+    industry: true                # 行业中性化（按 industries 板块归属）
+    mktcap: true                  # 市值中性化（close × 总股本；westock 股本）
+
+regime:
+  enabled: false                  # 扩宇宙基线先不叠加择时，评估纯选股 alpha
+
+# 因子：从 IC 检验通过的集合起步（见 data/reports/factor_ic/，
+# 银行池通过：volatility/amplitude/atr/bollinger/rsi —— 权重先等分，
+# 待攒够多行业 IC 报告后用 factor_optimizer --ic-report 搜权重）
+factors:
+  volatility_20d:
+    enabled: true
+    weight: 0.25
+    module: technical
+    params: {window: 20}
+  amplitude_20d:
+    enabled: true
+    weight: 0.20
+    module: technical
+    params: {window: 20}
+  atr_14:
+    enabled: true
+    weight: 0.20
+    module: technical
+    params: {window: 14}
+  bollinger_position:
+    enabled: true
+    weight: 0.175
+    module: technical
+    params: {window: 20, num_std: 2}
+  rsi_14:
+    enabled: true
+    weight: 0.175
+    module: technical
+    params: {window: 14}

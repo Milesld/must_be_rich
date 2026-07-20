@@ -88,6 +88,20 @@ class ConfigDrivenStrategy:
         self.rebalance_freq = cfg.get("rebalance_frequency", "monthly")
         self.min_shares = cfg.get("min_shares", 100)
         self.optimizer = cfg.get("optimizer", "equal_weight")
+
+        # ── 组合规则 + 中性化（路线图第 7 阶段，均默认关闭）──
+        from research.portfolio_rules import portfolio_rules_from_config
+        self._rules = portfolio_rules_from_config(config)
+        neut_cfg = cfg.get("neutralize", {}) or {}
+        self._neut_industry = bool(neut_cfg.get("industry", False))
+        self._neut_mktcap = bool(neut_cfg.get("mktcap", False))
+        # 行业映射：约束或行业中性化启用时才构建（板块成分有磁盘缓存，代价小）
+        self._sector_map: dict[str, str] = {}
+        if self._neut_industry or self._rules["max_per_sector"]:
+            self._sector_map = _build_sector_map(config)
+            if not self._sector_map:
+                logger.warning("行业映射为空，行业中性化/单行业上限将不生效")
+
         self.factors = _enabled_factors(config)
         total_w = sum(f.get("weight", 0) for f in self.factors)
         if total_w > 0:
@@ -191,7 +205,15 @@ class ConfigDrivenStrategy:
         if scores.empty:
             return intents
 
-        target_codes = set(scores.nlargest(self.top_n).index)
+        from research.portfolio_rules import select_target_portfolio
+        held_codes = {c for c, s in positions.items() if s > 0}
+        target_codes = set(select_target_portfolio(
+            scores, self.top_n,
+            held=held_codes,
+            rank_buffer=self._rules["rank_buffer"],
+            sector_map=self._sector_map,
+            max_per_sector=self._rules["max_per_sector"],
+        ))
 
         # ── 用建议仓位比例缩放可投入资金 ──
         pos_value = sum(
@@ -202,7 +224,10 @@ class ConfigDrivenStrategy:
         target_pos_value = total_value * suggested_pos_ratio
 
         # ★ 等权重置：目标池每只股票占等额资金（含已持有+新买入）
-        per_stock_target_value = target_pos_value / self.top_n
+        #   单票权重上限（max_weight_per_stock）生效时压到上限，超额留现金
+        from research.portfolio_rules import per_stock_weight
+        per_stock_target_value = total_value * suggested_pos_ratio * per_stock_weight(
+            self.top_n, self._rules["max_weight"])
 
         # 卖出不在目标池的全部持仓
         for code, shares in list(positions.items()):
@@ -304,8 +329,14 @@ class ConfigDrivenStrategy:
         return should
 
     def _score_stocks(self, features: pd.DataFrame) -> pd.Series:
-        """根据 config 中启用的因子及其 weight 计算综合评分。"""
+        """根据 config 中启用的因子及其 weight 计算综合评分。
+
+        strategy.neutralize.industry/mktcap 开启时，先对每个因子做
+        行业/市值中性化（回归取残差，复用 core/features/neutralizer），
+        再排名——排名的是「纯因子暴露」而非原始值。
+        """
         scores = pd.Series(0.0, index=features.index)
+        industry_labels, mktcaps = self._neutralize_inputs(features)
 
         for fg in self.factors:
             name = fg["name"]
@@ -316,6 +347,7 @@ class ConfigDrivenStrategy:
             vals = features[name].dropna()
             if len(vals) == 0:
                 continue
+            vals = self._neutralize_factor(vals, industry_labels, mktcaps)
 
             rank = vals.rank(pct=True)
             if self._is_inverse(name):
@@ -325,6 +357,38 @@ class ConfigDrivenStrategy:
             scores.loc[common] = scores.loc[common] + rank.loc[common].astype(float) * weight
 
         return scores
+
+    def _neutralize_inputs(self, features: pd.DataFrame):
+        """准备中性化输入：行业标签 Series 与市值 Series（未启用时 None）。"""
+        industry_labels = None
+        if self._neut_industry and self._sector_map:
+            industry_labels = pd.Series(
+                {c: self._sector_map.get(c) for c in features.index})
+        mktcaps = None
+        if self._neut_mktcap and "_mktcap" in features.columns:
+            mc = features["_mktcap"]
+            if (mc > 0).sum() >= 10:
+                mktcaps = mc
+        return industry_labels, mktcaps
+
+    def _neutralize_factor(self, vals: pd.Series, industry_labels, mktcaps) -> pd.Series:
+        """单因子中性化（MAD 缩尾 → 行业/市值回归取残差）。输入不足时原样返回。"""
+        if industry_labels is None and mktcaps is None:
+            return vals
+        from core.features.neutralizer import (
+            mad_winsorize, neutralize_by_industry,
+            neutralize_by_market_cap, neutralize_industry_mcap,
+        )
+        out = mad_winsorize(vals)
+        ind = industry_labels.reindex(out.index) if industry_labels is not None else None
+        mc = mktcaps.reindex(out.index) if mktcaps is not None else None
+        if ind is not None and mc is not None:
+            out = neutralize_industry_mcap(out, ind, mc)
+        elif ind is not None:
+            out = neutralize_by_industry(out, ind)
+        else:
+            out = neutralize_by_market_cap(out, mc)
+        return out.dropna()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -378,6 +442,33 @@ def _get_codes(config: dict) -> list[str]:
 def _is_dynamic_universe(config: dict) -> bool:
     uni = config.get("data_source", {}).get("universe", {})
     return isinstance(uni, dict) and uni.get("mode") == "dynamic"
+
+
+def _build_sector_map(config: dict) -> dict[str, str]:
+    """{code: 行业标签}——dynamic 模式按「代码来自哪个板块」标注。
+
+    多板块并集宇宙中每只票归属其所在板块（先到先得，成分重叠时归前者）。
+    行业中性化与单行业只数上限（strategy.max_per_sector）用。
+    拉取失败降级为空 map（约束/中性化自动失效，不阻断回测）。
+    """
+    if not _is_dynamic_universe(config):
+        return {}
+    industries = config["data_source"]["universe"].get("industries", [])
+    out: dict[str, str] = {}
+    for board in industries:
+        try:
+            if _provider(config) == "westock":
+                from research.westock_source import westock_industry_cons
+                cons = westock_industry_cons([board])
+            else:
+                from research.universe import build_industry_universe
+                cons = build_industry_universe([board])
+        except Exception as ex:
+            logger.warning("行业映射 %s 拉取失败（%s），该板块标签缺失", board, ex)
+            continue
+        for c in cons:
+            out.setdefault(c, board)
+    return out
 
 
 def _build_monthly_universe(raw_data: dict[date, dict], config: dict) -> dict[date, list[str]]:
@@ -1125,6 +1216,10 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict | None 
             prev_close[0] = arr[0]
 
             row: dict[str, Any] = {"code": code}
+            # 辅助列（下划线前缀，非因子）：市值 = 当日 close × 当前总股本，
+            # 市值中性化用；无股本数据时为 0（中性化自动跳过该票）
+            _ts = total_shares.get(code)
+            row["_mktcap"] = float(arr[-1]) * float(_ts) if _ts else 0.0
 
             # 基本面 PIT 快照（westock 时间序列）；旧式则整段当快照
             if not financials:

@@ -356,7 +356,9 @@ def cmd_signal(config_path: str, pool: str, budget: float, top_n: int) -> None:
         ledger = new_ledger(pool, config_path, budget)
         print(f"  新建账本: {ledger_path(pool)}（初始资金 ¥{budget:,.0f}）")
 
-    results = pick_stocks(config_path, show_n=top_n, buy_n=top_n, budget=budget)
+    held = {c for c, p in ledger["positions"].items() if p.get("shares", 0) > 0}
+    results = pick_stocks(config_path, show_n=top_n, buy_n=top_n, budget=budget,
+                          held=held)
     if not results:
         print("  ✗ 信号生成失败（数据/宇宙为空），账本未变更")
         return

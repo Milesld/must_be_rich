@@ -27,7 +27,8 @@ from research.run_backtest_demo import (
 )
 
 
-def pick_stocks(config_path: str, show_n: int, buy_n: int, budget: float) -> list[dict]:
+def pick_stocks(config_path: str, show_n: int, buy_n: int, budget: float,
+                held: set[str] | None = None) -> list[dict]:
     """加载策略配置，计算今天应持有的 top-N 股票。
 
     Args:
@@ -35,6 +36,8 @@ def pick_stocks(config_path: str, show_n: int, buy_n: int, budget: float) -> lis
         show_n: 显示前几名
         buy_n: 实际买入几只（用于算每只预算 = budget / buy_n）
         budget: 该池总预算
+        held: 当前持仓代码（paper_trading 传入；配置了 strategy.rank_buffer
+              时用于换手缓冲——已持有且排名未跌出 buffer 的票保留）
     """
     config = load_config(config_path)
     config["strategy"]["top_n"] = show_n
@@ -98,7 +101,16 @@ def pick_stocks(config_path: str, show_n: int, buy_n: int, budget: float) -> lis
             print("  ✗ 当月宇宙内无可打分标的")
             return []
     scores = strategy._score_stocks(features)
-    top = scores.nlargest(show_n)
+    # 与回测同一套组合规则（rank buffer 换手缓冲 + 单行业只数上限）
+    from research.portfolio_rules import select_target_portfolio
+    target = select_target_portfolio(
+        scores, show_n,
+        held=held or set(),
+        rank_buffer=strategy._rules["rank_buffer"],
+        sector_map=strategy._sector_map,
+        max_per_sector=strategy._rules["max_per_sector"],
+    )
+    top = scores.loc[target]
 
     per_stock = budget / buy_n
     results = []
