@@ -91,6 +91,14 @@ ALL_NO_DATA = (
     | NEEDS_QUARTERLY
 )
 
+# westock provider 有真数据的基本面因子（真财报 PIT 对齐 + PB/PE 历史重算），
+# westock 模式下从 ALL_NO_DATA 排除集中放开。factor_ic.py 复用同一集合。
+WESTOCK_REAL_FUNDAMENTALS = {
+    "roe_ttm", "revenue_yoy", "net_profit_yoy",
+    "gross_margin", "net_margin_ttm",
+    "pb", "pe_ttm", "peg",
+}
+
 # ══════════════════════════════════════════════════════════════
 # 因子池
 # ══════════════════════════════════════════════════════════════
@@ -748,6 +756,8 @@ def optimize(
     min_factors: int = 2,
     max_factors: int = 10,
     search_years: float | None = None,
+    ic_report_path: str | None = None,
+    min_icir: float | None = None,
 ) -> list[dict]:
     """因子组合优化入口：短窗口搜索 + 全区间验证 Top-3。
 
@@ -758,6 +768,9 @@ def optimize(
         min_factors / max_factors: 因子数范围。
         search_years: 搜索用的窗口长度（年）。None=全区间, 0.5=半年, 1=1年。
                       缩短搜索窗口可加速 2~4 倍，Top-3 自动用全区间验证。
+        ic_report_path: factor_ic.py 生成的 IC 报告 JSON。给定时，候选池
+                        剔除 ICIR 不达标的因子（只搜「已证明有信息量」的信号）。
+        min_icir: ICIR 门槛；缺省用报告里的 icir_threshold。
     """
     base_config = load_config(config_path)
     all_factors = base_config.get("factors", {})
@@ -792,14 +805,29 @@ def optimize(
     no_data = set(ALL_NO_DATA)
     if _provider(base_config) == "westock":
         # westock 有真财报 + PIT 重算 PB/PE，放开这 8 个基本面因子
-        no_data -= {"roe_ttm", "revenue_yoy", "net_profit_yoy",
-                    "gross_margin", "net_margin_ttm",
-                    "pb", "pe_ttm", "peg"}
+        no_data -= WESTOCK_REAL_FUNDAMENTALS
     candidates = [c for c in raw_candidates if c not in no_data]
     skipped = [c for c in raw_candidates if c in no_data]
 
     if skipped:
         print(f"  ⚠ 已排除 {len(skipped)} 个无数据源的因子")
+
+    # ── IC 门禁（路线图第 5 阶段）：只搜「已证明有信息量」的因子 ──
+    if ic_report_path:
+        import json as _json
+        from research.factor_ic import filter_candidates_by_report
+        ic_report = _json.loads(Path(ic_report_path).read_text())
+        threshold = min_icir if min_icir is not None else \
+            ic_report.get("icir_threshold", 0.3)
+        candidates, ic_dropped, ic_missing = filter_candidates_by_report(
+            candidates, ic_report, threshold)
+        print(f"  ★ IC 门禁: ICIR ≥ {threshold}（报告 {ic_report_path}）")
+        if ic_dropped:
+            print(f"    剔除 {len(ic_dropped)} 个未通过检验的因子: {', '.join(ic_dropped)}")
+        if ic_missing:
+            print(f"    ⚠ {len(ic_missing)} 个因子不在报告中（保留，建议补跑 factor_ic）: "
+                  f"{', '.join(ic_missing)}")
+
     if len(candidates) < 3:
         print(f"候选因子不足（{len(candidates)}个），至少需要 3 个")
         return []
@@ -1032,12 +1060,18 @@ def main() -> None:
     parser.add_argument("--max-factors", type=int, default=6, dest="max_factors")
     parser.add_argument("--search-years", type=float, default=None, dest="search_years",
                         help="搜索用窗口长度（年），例如 1=1年, 0.5=半年。缩短可加速 2-4 倍")
+    parser.add_argument("--ic-report", default=None, dest="ic_report",
+                        help="factor_ic.py 的报告 JSON；给定时剔除 ICIR 不达标的候选因子")
+    parser.add_argument("--min-icir", type=float, default=None, dest="min_icir",
+                        help="ICIR 门槛（缺省用报告内 icir_threshold）")
     args = parser.parse_args()
 
     results = optimize(
         args.config, args.task, args.rounds,
         args.min_factors, args.max_factors,
         args.search_years,
+        ic_report_path=args.ic_report,
+        min_icir=args.min_icir,
     )
     print_report(results)
 
