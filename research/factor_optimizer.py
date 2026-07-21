@@ -230,8 +230,8 @@ def _load_shared_data(config: dict) -> dict | None:
     与"选了哪些因子"无关。把它们提到优化循环外只加载一次，避免每个候选
     因子组合都重复联网拉取（之前 100 轮 = 最多 100 次全量网络加载）。
 
-    注意：不加载基本面数据（_load_financials）——其输出（ROE/营收增速等）
-    全部在 ALL_NO_DATA 中被过滤，且 ROE 是伪造值，加载纯属浪费。
+    注意：非 westock 模式不加载基本面数据——akshare 无可靠财报源，
+    其因子全部在 ALL_NO_DATA 中被过滤，加载纯属浪费。
 
     Returns:
         {raw_data, overseas_data, market_wide_data, benchmark_index, monthly_universe}

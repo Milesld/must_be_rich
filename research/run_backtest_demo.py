@@ -818,84 +818,8 @@ def _financials_as_of(fin_series: list[dict] | None, trade_date: date) -> dict[s
     return {k: v for k, v in chosen.items() if k not in ("announce_date", "end_date")}
 
 
-def _load_financials(codes: list[str]) -> dict[str, dict[str, float]]:
-    """拉取基本面数据：使用东方财富个股财务摘要接口。
-
-    数据项：净利润、营收增速、净利增速、ROE、净资产、每股收益、
-           每股净资产、资产负债率、流动比率、速动比率。
-
-    Returns:
-        {code: {roe_ttm: x, revenue_yoy: y, net_profit_yoy: z, debt_ratio: d, ...}}
-    """
-    import akshare as ak
-
-    result: dict[str, dict[str, float]] = {}
-    logger.info("正在拉取 %d 只股票的基本面数据（东方财富接口）...", len(codes))
-
-    for i, code in enumerate(codes):
-        try:
-            df = ak.stock_financial_abstract_ths(symbol=code, indicator="按年度")
-            if df is None or len(df) == 0:
-                continue
-
-            latest = df.iloc[-1]  # 最新一年
-            prev_year = df.iloc[-2] if len(df) >= 2 else None
-
-            fundamentals: dict[str, float] = {}
-
-            # 从同花顺接口映射到内部因子名
-            col_map_direct = {
-                "净利润": "net_profit_latest",
-                "净利润同比增长率": "net_profit_yoy",
-                "营业总收入": "revenue_latest",
-                "营业总收入同比增长率": "revenue_yoy",
-                "资产负债率": "debt_ratio",
-                "流动比率": "current_ratio",
-                "速动比率": "quick_ratio",
-                "每股净资产": "bps",
-            }
-            for col, factor_name in col_map_direct.items():
-                if col in latest.index:
-                    raw = str(latest[col]).replace("%", "").replace("亿", "").replace(",", "")
-                    try:
-                        v = float(raw)
-                        # 百分比转小数（增长率、负债率等 % 值）
-                        if "%" in str(latest[col]):
-                            v = v / 100.0
-                        # 净利润可能是亿为单位 → 保持原值
-                        fundamentals[factor_name] = v
-                    except ValueError:
-                        pass
-
-            # 计算 ROE = 净利润 / 净资产（每股净资产 × 总股本近似）
-            # 简化：直接用 growth 和 quality 代理
-            net_profit_raw = str(latest.get("净利润", "0")).replace("亿", "").replace(",", "")
-            try:
-                net_profit_val = float(net_profit_raw)
-                # 从 bps * 股本 反推净资产太复杂，用 trend 代理 ROE
-                # ROE ≈ 净利增速 / 营收增速 的质量调整值
-                rev_yoy = fundamentals.get("revenue_yoy", 0)
-                np_yoy = fundamentals.get("net_profit_yoy", 0)
-                if rev_yoy and rev_yoy > 0:
-                    fundamentals["roe_ttm"] = np_yoy / rev_yoy if abs(rev_yoy) > 0.01 else 0.15
-                else:
-                    fundamentals["roe_ttm"] = 0.10  # 默认中性
-            except (ValueError, ZeroDivisionError):
-                fundamentals["roe_ttm"] = 0.10
-
-            # ROA ≈ 净利增速 * 0.6（粗估）
-            fundamentals["roa_ttm"] = fundamentals.get("net_profit_yoy", 0.05) * 0.6
-
-            if fundamentals:
-                result[code] = fundamentals
-
-            if (i + 1) % 20 == 0:
-                logger.info("  基本面数据: %d/%d", i + 1, len(codes))
-        except Exception:
-            continue
-
-    logger.info("基本面数据加载完成: %d 只股票", len(result))
-    return result
+# （已删除 _load_financials：akshare 同花顺摘要的 ROE 是 net_profit_yoy/revenue_yoy
+#   伪造值，无调用方。真财报走 westock_financials，PIT 对齐见 _financials_as_of。）
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1688,7 +1612,7 @@ def main(config_path: str = "configs/strategy.yaml", full_range: bool = False) -
     # 基本面数据：
     # - westock 模式加载真财报时间序列（真 ROE/营收同比，按 InfoPublDate PIT 对齐）
     #   + 当前总股本（B 类估值因子 PB/PE/PEG 用）
-    # - 其它模式不加载（akshare _load_financials 的 ROE 是伪造值，已弃用）
+    # - 其它模式不加载（akshare 无可靠基本面数据源）
     if _provider(config) == "westock":
         from research.westock_source import westock_financials, westock_total_shares
         _codes = _get_codes(config)

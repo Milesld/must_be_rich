@@ -18,6 +18,12 @@ build/
 .venv/
 venv/
 
+# 根目录临时输出（回测/优化器重定向日志）
+/temp_output*.log
+/output_*.log
+/optimizer_*.log
+/run.sh
+
 # 运行时数据（不提交——每个环境独立生成）
 data/checkpoints/
 data/models/

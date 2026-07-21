@@ -1,34 +1,41 @@
 # A股量化交易系统
 
-基于 **长期选股 + 盘前推荐 + 日内预测** 三子系统分层聚焦的量化交易平台。
+个人量化研究与交易系统：**本地数据仓 → 研究回测 → 每日信号 → 模拟盘对账 → 手动/半自动下单**。
 
 > ⚠️ **风险声明**：本文不构成任何投资建议。量化交易存在本金损失风险，实盘前必须经过充分回测与模拟验证。没有任何系统能稳定准确地预测股价。
 
 ---
 
-## 系统架构
+## 系统架构（主路径 = research/ 研究链）
 
 ```
-长期选股（月度，全市场）
-    │ 底池筛选 + 方向约束
+scripts/update_data.py        每日增量：行情入 Parquet 仓 + 行业成分快照（PIT 成分库）
     ▼
-盘前推荐（日频，~30-80只精选）
-    │ 关注清单 + 入场区间
+research/run_backtest_demo.py 回测（板块涨跌停/封板/费用滑点/PIT 财报/动态宇宙）
+research/factor_ic.py         因子 IC 检验（RankIC/ICIR 门禁，先证明有信息量）
+research/factor_optimizer.py  因子组合搜索（Optuna，--ic-report 只搜通过检验的因子）
     ▼
-日内预测（分钟，~5-15只高频跟踪）
+research/pick_stocks.py       每日信号（与回测同一套打分/组合规则）
+research/paper_trading.py     模拟盘双账本对账（验证「回测 ≈ 现实」，实盘前闸门）
 ```
 
-三子系统在时间维度上层层聚焦：数据层共享、模型层独立、资金层硬隔离。
+回测、实盘选股、模拟盘三处共用同一套因子计算、打分与组合规则代码——
+「回测的策略 = 实盘跑的策略」是本系统的第一设计原则。
+
+> `services/` 下的 9 个微服务是早期架构原型，**已封存不维护**
+> （见 `services/README.md`）；`docker-compose*.yml` 亦仅供参考。
+> 改进历史与后续计划见 `docs/REVIEW_AND_ROADMAP_2026-07.md`。
 
 ### 技术栈
 
 | 组件 | 方案 |
 |------|------|
-| 语言 | Python 3.12（策略/研究）+ C++17（风控/执行） |
-| ML模型 | LightGBM（表格排序分类）+ CatBoost + Qwen3（NLP情绪） |
-| 数据源 | AkShare（免费主源）/ Tushare（备用）/ QMT L2（升级路径） |
-| 消息中间件 | Redpanda（Kafka兼容，开发环境降级为日志模式） |
-| 部署 | Docker Compose（9个微服务）+ Prometheus + Grafana |
+| 语言 | Python 3.12 |
+| 数据源 | westock-data（腾讯源，主）/ AkShare（备）→ 本地 Parquet 数据仓 |
+| 回测 | 自研引擎（core/backtest：真实费用/滑点/板块涨跌停/封板约束） |
+| 因子检验 | RankIC/ICIR/分层回测（research/factor_ic.py） |
+| 优化器 | Optuna TPE + Walk-Forward + IC 门禁 |
+| ML模型 | LightGBM（可选，研究用） |
 
 ---
 
