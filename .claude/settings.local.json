@@ -26,7 +26,9 @@
       "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/westock_source.py research/run_backtest_demo.py research/factor_optimizer.py)",
       "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/westock_source.py research/run_backtest_demo.py)",
       "Bash(awk '/优化结果/{f=1} f' optimizer_semiconductor.log)",
-      "Bash(awk '/优化结果/{f=1} f' optimizer_bank.log)"
+      "Bash(awk '/优化结果/{f=1} f' optimizer_bank.log)",
+      "Bash(/Users/lidong/miniforge3/bin/python -m py_compile research/sector_rotation.py)",
+      "Bash(/Users/lidong/miniforge3/bin/python -c \"import yaml; c=yaml.safe_load\\(open\\('configs/sector_rotation.yaml'\\)\\); print\\('yaml OK, 行业数:', len\\(c['sectors']\\), '| top_k:', c['rotation']['top_k'], '| 因子:', list\\(c['factors'].keys\\(\\)\\)\\)\")"
     ]
   }
 }
