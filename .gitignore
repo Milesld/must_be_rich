@@ -62,3 +62,6 @@ cpp/build/
 
 # Docker volumes (从 docker-compose 挂载的)
 data/
+
+# WorkBuddy 本地代理数据（记忆/技能，每台机器不同）
+.workbuddy/
