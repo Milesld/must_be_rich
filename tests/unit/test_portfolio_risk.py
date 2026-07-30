@@ -74,6 +74,26 @@ class TestMarketRegime:
         for v in r.dimension_scores.values():
             assert 0.0 <= v <= 1.0
 
+    def test_missing_dimensions_dont_dilute_score(self) -> None:
+        """宽基路径只有 close：breadth/valuation/overseas 无数据，
+        应剔除后按剩余权重归一化，而不是按 0.5 计权稀释趋势/波动。"""
+        from core.portfolio.regime import MarketRegimeDetector
+
+        dates = pd.date_range("2020-01-01", "2026-06-07", freq="B")
+        close = pd.Series(100 * (1.0005 ** np.arange(len(dates))), index=dates)
+        df = pd.DataFrame({"close": close}, index=dates)
+
+        d = MarketRegimeDetector({"dimension_weights": {
+            "trend": 0.30, "volatility": 0.25, "breadth": 0.15,
+            "overseas": 0.30, "valuation": 0.0,
+        }})
+        r = d.detect(date(2026, 6, 7), df)
+        expected = (r.dimension_scores["trend"] * 0.30
+                    + r.dimension_scores["volatility"] * 0.25) / 0.55
+        assert abs(r.composite_score - expected) < 1e-9
+        # 报告口径仍列出全部 5 个维度，无数据的显示中性 0.5
+        assert r.dimension_scores["breadth"] == 0.5
+
     def test_regime_result_repr(self) -> None:
         from core.portfolio.regime import RegimeResult
         r = RegimeResult(regime_label="牛市低波动", composite_score=0.85)

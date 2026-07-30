@@ -98,17 +98,25 @@ class TradingCalendar:
         return results
 
     def is_month_end(self, d: date) -> bool:
-        """判断 d 是否为当月最后一个交易日。"""
+        """判断 d 是否为当月最后一个交易日。
+
+        d 是日历缓存的最后一天时无法看到下一个交易日，按"是最后一个交易日"处理，
+        而不是抛 ValueError（末日调仓判断不该让整个流程崩掉）。
+        """
         if not self.is_trading_day(d):
             return False
-        next_day = self.next_trading_day(d)
+        next_day = self._next_trading_day_or_none(d)
+        if next_day is None:
+            return True
         return next_day.month != d.month
 
     def is_quarter_end(self, d: date) -> bool:
         """判断 d 是否为当季最后一个交易日。"""
         if not self.is_trading_day(d):
             return False
-        next_day = self.next_trading_day(d)
+        next_day = self._next_trading_day_or_none(d)
+        if next_day is None:
+            return True
         # 季度切换：月份跨过一个能被3整除的边界
         current_quarter = (d.month - 1) // 3
         next_quarter = (next_day.month - 1) // 3
@@ -118,8 +126,17 @@ class TradingCalendar:
         """判断 d 是否为当年最后一个交易日。"""
         if not self.is_trading_day(d):
             return False
-        next_day = self.next_trading_day(d)
+        next_day = self._next_trading_day_or_none(d)
+        if next_day is None:
+            return True
         return next_day.year != d.year
+
+    def _next_trading_day_or_none(self, d: date) -> date | None:
+        """下一个交易日；超出日历缓存范围返回 None。"""
+        try:
+            return self.next_trading_day(d)
+        except ValueError:
+            return None
 
     def count_trading_days(self, start: date, end: date) -> int:
         """返回 [start, end] 区间内的交易日数量。"""

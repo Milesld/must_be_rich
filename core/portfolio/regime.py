@@ -138,10 +138,20 @@ class MarketRegimeDetector:
             "overseas": overseas_score,
         }
 
-        composite = sum(
-            scores[k] * self._weights.get(k, 0.25) for k in scores
-        )
+        # 无数据的维度（valuation/breadth/overseas 返回 None）不能按 0.5 计权：
+        # 那等于把它的权重变成一份"恒中性"票，稀释真正有信息的维度。
+        # 改为剔除该维度并按剩余权重归一化。
+        available = {k: v for k, v in scores.items() if v is not None}
+        weight_sum = sum(self._weights.get(k, 0.25) for k in available)
+        if weight_sum > 0:
+            composite = sum(
+                available[k] * self._weights.get(k, 0.25) for k in available
+            ) / weight_sum
+        else:
+            composite = 0.5
         composite = max(0.0, min(1.0, composite))
+        # 报告口径：无数据维度显示为中性 0.5（但未参与加权）
+        scores = {k: (0.5 if v is None else v) for k, v in scores.items()}
 
         # ★ 动量崩溃检测：评分快速下降 → 额外降仓
         position_ratio = self._score_to_position(composite)
@@ -226,19 +236,19 @@ class MarketRegimeDetector:
 
     # ── 维度3: 估值信号 ───────────────────────
 
-    def _calc_valuation_signal(self, df: pd.DataFrame) -> float:
+    def _calc_valuation_signal(self, df: pd.DataFrame) -> float | None:
         """估值信号：低估值=高分, 高估值=低分。
 
-        使用 PE/PB 在历史中的分位数。
+        使用 PE/PB 在历史中的分位数。无 PE/PB 数据返回 None（该维度不参与加权）。
         """
         if "pe_ttm" not in df.columns and "pb" not in df.columns:
-            return 0.5
+            return None
 
         # 优先PE，其次PB
         val_col = "pe_ttm" if "pe_ttm" in df.columns else "pb"
         vals = df[val_col].dropna()
         if len(vals) < 100:
-            return 0.5
+            return None
 
         current = vals.iloc[-1]
         rank = (vals < current).mean()  # 分位数
@@ -250,10 +260,12 @@ class MarketRegimeDetector:
 
     # ── 维度4: 市场宽度信号 ───────────────────────
 
-    def _calc_breadth_signal(self, df: pd.DataFrame) -> float:
+    def _calc_breadth_signal(self, df: pd.DataFrame) -> float | None:
         """市场宽度信号。
 
-        综合：上涨家数占比 + 创20日新高家数占比 + 涨停温度
+        综合：上涨家数占比 + 创20日新高家数占比 + 涨停温度。
+        宽基指数路径下 market_df 只有 close，三项都算不出 → 返回 None，
+        该维度不参与加权（旧实现恒返回 0.5，等于白占权重稀释其他维度）。
         """
         scores: list[float] = []
 
@@ -283,14 +295,14 @@ class MarketRegimeDetector:
                 scores.append(0.2)
 
         if not scores:
-            return 0.5
+            return None
         return sum(scores) / len(scores)
 
     # ── 维度5: 海外映射信号 ───────────────────────
 
     def _calc_overseas_signal(
         self, as_of_date: date, overseas_data: dict,
-    ) -> float:
+    ) -> float | None:
         """海外市场映射信号：隔夜美股/港股对A股科技板块的方向性影响。
 
         综合三个维度：
@@ -300,13 +312,16 @@ class MarketRegimeDetector:
 
         美股科技（NDX）对A股AI/半导体方向性最强，
         港股（HSI）作为中国资产定价的离岸锚。
+        无海外数据时返回 None（该维度不参与加权）。
         """
         if not overseas_data:
-            return 0.5
+            return None
 
-        dates = sorted([d for d in overseas_data if d <= as_of_date])
+        # 严格 < as_of_date：美股 T 日行情在 A 股 T 日收盘后约 13 小时才产生，
+        # T 日决策只能用 ≤T-1 的海外收盘（港股虽同时区，一并按 T-1 保守处理）。
+        dates = sorted([d for d in overseas_data if d < as_of_date])
         if len(dates) < self._overseas_short_window:
-            return 0.5
+            return None
 
         short_n = self._overseas_short_window
         long_n = min(self._overseas_long_window, len(dates))

@@ -514,9 +514,23 @@ def _build_monthly_universe(raw_data: dict[date, dict], config: dict) -> dict[da
             month_anchors[key] = d
 
     monthly: dict[date, list[str]] = {}
+    # PIT 成分：有 ≤anchor 的成分快照就用当时的成分，没有才回退当前成分
+    # （快照由 scripts/update_data.py 每日累积，早期月份通常还没有）
+    from research import warehouse as wh
+    _boards = uni.get("industries", []) or []
+    _snap_hits = 0
     for anchor in sorted(month_anchors.values()):
+        anchor_candidates = candidates
+        asof_cons: set[str] = set()
+        for b in _boards:
+            cons = wh.constituents_asof(b, anchor)
+            if cons:
+                asof_cons.update(cons)
+        if asof_cons:
+            anchor_candidates = [c for c in candidates if c in asof_cons]
+            _snap_hits += 1
         universe = filter_universe_pit(
-            candidates, anchor, raw_data,
+            anchor_candidates, anchor, raw_data,
             min_listing_months=min_listing_months,
             min_avg_amount=min_avg_amount,
             pool_size=pool_size,
@@ -524,6 +538,9 @@ def _build_monthly_universe(raw_data: dict[date, dict], config: dict) -> dict[da
         )
         monthly[anchor] = universe
         logger.info("当月宇宙 %s: %d 只", anchor, len(universe))
+    if _boards:
+        logger.info("PIT 成分快照命中 %d/%d 个月（未命中的月份回退当前成分，"
+                    "仍有幸存者偏差）", _snap_hits, len(month_anchors))
     return monthly
 
 
@@ -1065,29 +1082,29 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict | None 
     # ★ 从所有启用因子中自动推算最小 lookback（最长窗口 + 缓冲）
     _max_win = 22
     for fg in factors:
-        for v in fg.get("params", {}).values():
-            if isinstance(v, (int, float)):
-                _max_win = max(_max_win, int(v))
-    # 因子名含窗口的情况（如 momentum_60d → 60, volatility_20d → 20）
-    for fg in factors:
-        name = fg["name"]
-        parts = name.split("_")
-        if len(parts) >= 2:
-            try:
-                w = int(parts[-1].replace("d", ""))
-                _max_win = max(_max_win, w)
-            except ValueError:
-                pass
+        _max_win = max(_max_win, _factor_window(fg["name"], fg.get("params", {})))
     cfg_lookback = config["data_source"].get("lookback_days", 400)
     lookback = max(factor_settings.get("lookback_window", 60), _max_win + 10)
     min_points = factor_settings.get("min_price_points", 22)
+    # 数据跨度不够长窗口因子时，因子值会大面积算不出来（NaN）而不报错，
+    # 表现为"该因子静默失效"。这里在构建 loader 时就告警一次。
+    if cfg_lookback < _max_win * 1.5:
+        logger.warning(
+            "data_source.lookback_days=%d 偏小：最长因子窗口 %d 个交易日约需 %d 自然日，"
+            "长窗口因子在回测早期会算不出值。",
+            cfg_lookback, _max_win, int(_max_win * 1.5))
 
     def loader(trade_date: date, codes: list[str]) -> pd.DataFrame:
         lookback_dates = cal.get_prev_n_trading_days(trade_date, lookback)
         lookback_dates = [d for d in lookback_dates if d in raw_data]
 
-        # 当日海外数据
-        today_overseas = overseas_data.get(trade_date, {}) if overseas_data else {}
+        # 海外数据：只用 <trade_date 的最近一日（美股 T 日行情在 A 股 T 日收盘后
+        # 约 13 小时才产生，同日对齐即前视）。取最近可用日，跨周末/假期不丢信号。
+        today_overseas: dict[str, float] = {}
+        if overseas_data:
+            _prev = [d for d in overseas_data if d < trade_date]
+            if _prev:
+                today_overseas = overseas_data[max(_prev)]
         # 当日全市场数据
         today_market = market_wide_data.get(trade_date, {}) if market_wide_data else {}
         # 是否时间序列版 financials（westock：value 是 list；旧式是 dict）
@@ -1166,9 +1183,12 @@ def _build_feature_loader(raw_data: dict, config: dict, financials: dict | None 
                         close_price=float(arr[-1]),
                         total_shares=total_shares.get(code),
                     )
-                    row[name] = float(val) if val is not None and not np.isnan(val) else 0.0
+                    # 缺失/异常一律 NaN（不可填 0.0）：0.0 是截面最小值，反向因子
+                    # 1-rank 后会把"没数据"翻成最高分 → 缺财报股票被当最便宜买入。
+                    # NaN 由 _score_stocks 的 dropna 剔除，不参与该因子排名。
+                    row[name] = float(val) if val is not None and not np.isnan(val) else np.nan
                 except Exception:
-                    row[name] = 0.0
+                    row[name] = np.nan
 
             results.append(row)
 
@@ -1204,7 +1224,7 @@ def _add_cross_sectional_factors(
         for code in df["code"]:
             prices = price_hist.get(code, [])
             if len(prices) >= w + 1:
-                mom_values[code] = prices[-1] / prices[-min(w, len(prices))] - 1.0
+                mom_values[code] = prices[-1] / prices[-w - 1] - 1.0
             else:
                 mom_values[code] = 0.0
         # 市场平均只用宇宙内标的（无宇宙则用全部）
@@ -1224,7 +1244,7 @@ def _add_cross_sectional_factors(
         for code in df["code"]:
             prices = price_hist.get(code, [])
             if len(prices) >= w + 1:
-                mom_values[code] = prices[-1] / prices[-min(w, len(prices))] - 1.0
+                mom_values[code] = prices[-1] / prices[-w - 1] - 1.0
             else:
                 mom_values[code] = 0.0
         df["_raw_mom"] = df["code"].map(mom_values)
@@ -1271,7 +1291,8 @@ def _compute_factor_value(
                     w = int(name.split("_")[-1].replace("d", ""))
                 except ValueError:
                     pass
-            return float((arr[-1] / arr[-min(w, len(arr))] - 1.0)) if len(arr) >= w + 1 else 0.0
+            # w 日收益需跨 w 个间隔 → 基准是 arr[-w-1]（arr[-w] 只跨 w-1 日）
+            return float((arr[-1] / arr[-w - 1] - 1.0)) if len(arr) >= w + 1 else np.nan
 
         if name == "volatility_20d" or name.startswith("volatility_"):
             w = params.get("window", 20)
@@ -1513,6 +1534,25 @@ def _get_sector(code: str) -> str:
     return "__other__"
 
 
+def _factor_window(name: str, params: dict | None) -> int:
+    """单个因子需要的最大回看窗口（交易日）。
+
+    同时看 params 里的数值参数与因子名后缀（momentum_60d → 60）——
+    两处口径必须一致，否则 lookback 算少了长窗口因子会静默算不出值。
+    """
+    w = 0
+    for v in (params or {}).values():
+        if isinstance(v, (int, float)):
+            w = max(w, int(v))
+    parts = name.split("_")
+    if len(parts) >= 2:
+        try:
+            w = max(w, int(parts[-1].replace("d", "")))
+        except ValueError:
+            pass
+    return w
+
+
 def _calc_min_lookback(config: dict) -> int:
     """根据所有启用因子中最大的计算窗口，反推最小 lookback。
 
@@ -1523,11 +1563,7 @@ def _calc_min_lookback(config: dict) -> int:
     for fg_name, fg_cfg in config.get("factors", {}).items():
         if not fg_cfg.get("enabled", False):
             continue
-        params = fg_cfg.get("params", {})
-        # 取所有数值参数的最大值（window, fast, slow, signal, long 等）
-        for k, v in params.items():
-            if isinstance(v, (int, float)):
-                max_window = max(max_window, int(v))
+        max_window = max(max_window, _factor_window(fg_name, fg_cfg.get("params", {})))
     # 交易日 → 自然日（×1.5），+30 天缓冲
     return int(max_window * 1.5) + 30
 

@@ -155,10 +155,13 @@ def _board_limit(code: str) -> float:
     return _board_price_limit(code)
 
 
-def _cost_total(code: str, side: str, price: float, shares: int) -> float:
+def _cost_total(code: str, side: str, price: float, shares: int,
+                trade_date: str | None = None) -> float:
     from core.backtest.cost_model import TransactionCostModel
     from decimal import Decimal
-    cb = TransactionCostModel().calculate(code, side, Decimal(str(price)), shares)
+    td = date.fromisoformat(trade_date) if trade_date else None
+    cb = TransactionCostModel().calculate(
+        code, side, Decimal(str(price)), shares, trade_date=td)
     return float(cb.total)
 
 
@@ -171,6 +174,8 @@ def _apply_fill_to_book(
     realized = 0.0
     if side == "buy":
         cash -= amount + cost
+        if cash < 0:
+            logger.warning("%s 买入后账面现金为负 ¥%.0f（调用方应先做现金校验）", code, cash)
         pos = positions.setdefault(code, {"shares": 0, "avg_cost": 0.0})
         total_cost_basis = pos["avg_cost"] * pos["shares"] + amount + cost
         pos["shares"] += shares
@@ -263,7 +268,26 @@ def settle_orders(ledger: dict, bars: dict[str, list[dict]]) -> list[dict]:
                 continue
             shares = min(shares, held)
 
-        cost = _cost_total(code, side, open_px, shares)
+        cost = _cost_total(code, side, open_px, shares, fill_bar["date"])
+        if side == "buy" and ledger["cash"] < open_px * shares + cost:
+            # 信号价按前收算股数，真实开盘更高时可能买不起 → 按可用现金下调整手数，
+            # 一手都买不起才拒单。不这么做账本现金会变负（凭空透支）。
+            afford = int(ledger["cash"] * 0.999 / open_px / 100) * 100
+            while afford > 0 and ledger["cash"] < open_px * afford + _cost_total(
+                    code, side, open_px, afford, fill_bar["date"]):
+                afford -= 100
+            if afford <= 0:
+                order["status"] = "rejected"
+                order["reject_reason"] = (
+                    f"现金不足（需 ¥{open_px * shares + cost:,.0f}，"
+                    f"可用 ¥{ledger['cash']:,.0f}）")
+                order["fill_date"] = fill_bar["date"]
+                processed.append(order)
+                _shadow_fill(ledger, order)
+                continue
+            logger.warning("%s 现金不足，买入股数 %d → %d", code, shares, afford)
+            shares = afford
+            cost = _cost_total(code, side, open_px, shares, fill_bar["date"])
         ledger["cash"], realized = _apply_fill_to_book(
             ledger["cash"], ledger["positions"], code, side, open_px, shares, cost)
         order["status"] = "filled"
@@ -300,15 +324,23 @@ def _shadow_fill(ledger: dict, order: dict) -> None:
 
 # ── 净值更新（纯函数） ──────────────────────────────
 
-def update_nav(ledger: dict, bars: dict[str, list[dict]]) -> int:
+def update_nav(ledger: dict, bars: dict[str, list[dict]],
+               until: str | None = None) -> int:
     """把 nav_history 推进到行情覆盖的最新交易日，返回新增条数。
 
     每个交易日 nav = cash + Σ 持仓股数 × 当日收盘（停牌用最近已知收盘）。
-    注意：nav 只在订单结算之后调用才准确（settle 流程保证顺序）。
+    注意：nav 用「调用时刻」的持仓算，所以必须分两段调用（见 cmd_settle）：
+    结算前先把 ≤ 最早挂单信号日的净值补齐，结算后再推进剩余日期。
+    否则未结算日的历史净值会被结算后的新持仓回填（未来信息污染历史净值）。
+
+    Args:
+        until: 只推进到该日期（含）为止；None 表示推进到行情最后一日。
     """
     last_date = ledger["nav_history"][-1]["date"] if ledger["nav_history"] else ""
     market_dates = sorted({b["date"] for blist in bars.values() for b in blist})
     new_dates = [d for d in market_dates if d > last_date]
+    if until is not None:
+        new_dates = [d for d in new_dates if d <= until]
     if not new_dates:
         return 0
 
@@ -373,8 +405,25 @@ def cmd_signal(config_path: str, pool: str, budget: float, top_n: int) -> None:
     prices = {r["code"]: float(r["close"]) for r in results if r["close"]}
     scores = {r["code"]: r["score"] for r in results}
     # 持仓里不在目标池的股票也需要现价（生成卖单用信号日收盘）——
-    # pick_stocks 只返回 top-N，持仓价用最近成本价兜底，settle 时按真实开盘成交
+    # pick_stocks 只返回 top-N，缺的那些直接补拉最近收盘。
+    # 不能用 avg_cost 兜底：avg_cost 与市价可能差很远，会让 signal_close 失真
+    # → 影子账本成交价、exec_gap_pct 基准、settle 里的涨跌停基准全错。
+    _missing = [c for c, p in ledger["positions"].items()
+                if c not in prices and p.get("shares", 0) > 0]
+    if _missing:
+        try:
+            from research.westock_source import westock_kline
+            _df = westock_kline(_missing, date.today() - timedelta(days=30), date.today())
+            if _df is not None and not _df.empty:
+                for c, g in _df.groupby("code"):
+                    g = g.sort_values("trade_date")
+                    prices[str(c)] = float(g.iloc[-1]["close"])
+        except Exception as ex:
+            logger.warning("持仓现价补拉失败，退回成本价兜底: %s", ex)
     for code, pos in ledger["positions"].items():
+        if code not in prices and pos.get("shares", 0) > 0:
+            logger.warning("%s 无最新收盘价，暂用成本价 %.2f 作信号价（偏差统计会失真）",
+                           code, pos["avg_cost"])
         prices.setdefault(code, pos["avg_cost"])
 
     # 幂等：清掉同日旧 pending 再生成
@@ -429,8 +478,13 @@ def cmd_settle(pool: str) -> None:
             {"date": str(r.trade_date), "open": float(r.open), "close": float(r.close)}
             for r in g.itertuples()]
 
+    # 先用「结算前」的持仓把 ≤ 最早挂单信号日的净值补齐，再结算，
+    # 否则这些历史交易日的净值会被结算后的新持仓回填（未来信息）。
+    pre_cutoff = min((o["signal_date"] for o in ledger["pending_orders"]), default=None)
+    added = update_nav(ledger, bars, until=pre_cutoff) if pre_cutoff else 0
+
     processed = settle_orders(ledger, bars)
-    added = update_nav(ledger, bars)
+    added += update_nav(ledger, bars)
     save_ledger(ledger)
 
     for o in processed:
@@ -487,8 +541,10 @@ def cmd_report(pool: str) -> None:
         gaps = [t["exec_gap_pct"] for t in filled]
         buy_gaps = [t["exec_gap_pct"] for t in filled if t["side"] == "buy"]
         print(f"\n  成交 {len(filled)} 笔 | 拒/撤 {len(rejected)} 笔")
-        print(f"  开盘 vs 信号收盘价偏差: 均值 {sum(gaps)/len(gaps):+.2f}% "
-              f"| 买单均值 {sum(buy_gaps)/len(buy_gaps):+.2f}%" if buy_gaps else "")
+        line = f"  开盘 vs 信号收盘价偏差: 均值 {sum(gaps)/len(gaps):+.2f}%"
+        if buy_gaps:
+            line += f" | 买单均值 {sum(buy_gaps)/len(buy_gaps):+.2f}%"
+        print(line)
     if rejected:
         print("  被拒/撤订单（回测中它们可能被假设成交）:")
         for t in rejected:

@@ -259,9 +259,13 @@ def _fetch_one_segment(code: str, s: str, e: str, max_retries: int = 2) -> list[
     (十几条)可传更大值(如 4)确保拉全。注意空数组=该段真无数据(次新)，不重试。
     """
     cache_key = f"kline_{code}_{s}_{e}"
-    cached = _cache_get(cache_key, ttl_days=3650)  # 历史行情不变，长期缓存
-    if cached is not None:
-        return cached
+    # 含今日的段里最后一根 bar 可能还没定盘（盘中/收盘前跑），不可长期缓存，
+    # 否则不完整的当日 bar 会被固化 10 年（B15）。
+    _spans_today = e >= date.today().isoformat()
+    if not _spans_today:
+        cached = _cache_get(cache_key, ttl_days=3650)  # 历史行情不变，长期缓存
+        if cached is not None:
+            return cached
 
     import time
     time.sleep(0.15)  # 段间基础延时，降低触发限流概率
@@ -306,7 +310,8 @@ def _fetch_one_segment(code: str, s: str, e: str, max_retries: int = 2) -> list[
             "amount": r.get("amount", 0),
             "turnover": r.get("exchange", 0),  # exchange 实为换手率%
         })
-    _cache_put(cache_key, rows)
+    if not _spans_today:
+        _cache_put(cache_key, rows)
     return rows
 
 

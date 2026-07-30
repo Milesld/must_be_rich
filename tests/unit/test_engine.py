@@ -225,6 +225,45 @@ class TestBacktestEngine:
         # 现金增加：168000 - 110.88 = 167889.12
         assert engine.cash > 1_000_000
 
+    def test_oversell_truncated_to_holdings(self) -> None:
+        """卖出超持仓：按实际持仓截断，不许凭空造现金/负持仓。"""
+        engine = BacktestEngine(
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 2),
+            initial_capital=1_000_000,
+        )
+        engine.positions["600519"] = 100
+        engine.position_costs["600519"] = 1600.0
+
+        record = TradeRecord(
+            trade_id="t3", signal_id="s3", code="600519", side="sell",
+            trade_date=date(2024, 1, 3), intent_price=1680.0,
+            intent_shares=500, filled_price=1680.0, filled_shares=500,
+            status="filled",
+        )
+        engine._apply_fill(record)
+
+        assert record.filled_shares == 100
+        assert engine.positions.get("600519", 0) == 0
+        # 只卖出 100 股 → 现金增量应接近 168000，而非 840000
+        assert engine.cash < 1_000_000 + 170_000
+
+    def test_sell_without_position_rejected(self) -> None:
+        engine = BacktestEngine(
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 2),
+            initial_capital=1_000_000,
+        )
+        record = TradeRecord(
+            trade_id="t4", signal_id="s4", code="600519", side="sell",
+            trade_date=date(2024, 1, 3), intent_price=1680.0,
+            intent_shares=100, filled_price=1680.0, filled_shares=100,
+            status="filled",
+        )
+        engine._apply_fill(record)
+        assert record.status == "rejected"
+        assert engine.cash == 1_000_000
+
     def test_save_and_load_state(self, tmp_path) -> None:
         """暂停/继续：状态保存和恢复。"""
         engine = BacktestEngine(

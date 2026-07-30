@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from datetime import date
 
 import pytest
 
@@ -136,6 +137,39 @@ class TestTotalCost:
             cost.commission + cost.stamp_duty + cost.transfer_fee + cost.slippage_est
         )
         assert cost.total == expected_total
+
+
+class TestStampDutyHistory:
+    """印花税按交易日分段：2023-08-28 起减半为 0.05%。"""
+
+    def test_before_cut_date_is_one_permille(self, model: TransactionCostModel) -> None:
+        cost = model.calculate("600519", "sell", 100.0, 1000,
+                               trade_date=date(2023, 8, 25))
+        assert cost.stamp_duty == Decimal("100.00")  # 100000 × 0.1%
+
+    def test_on_and_after_cut_date_is_half(self, model: TransactionCostModel) -> None:
+        cost = model.calculate("600519", "sell", 100.0, 1000,
+                               trade_date=date(2023, 8, 28))
+        assert cost.stamp_duty == Decimal("50.00")   # 100000 × 0.05%
+
+    def test_explicit_override_wins(self) -> None:
+        m = TransactionCostModel(stamp_duty_rate=Decimal("0.002"))
+        cost = m.calculate("600519", "sell", 100.0, 1000,
+                           trade_date=date(2023, 1, 1))
+        assert cost.stamp_duty == Decimal("200.00")
+
+
+class TestFundStampDutyExemption:
+    """基金/ETF 免征印花税，代码段需覆盖沪深两市。"""
+
+    @pytest.mark.parametrize("code", ["510300", "588000", "159915", "161725"])
+    def test_fund_codes_exempt(self, model: TransactionCostModel, code: str) -> None:
+        cost = model.calculate(code, "sell", 10.0, 1000)
+        assert cost.stamp_duty == Decimal("0")
+
+    def test_stock_not_exempt(self, model: TransactionCostModel) -> None:
+        cost = model.calculate("600519", "sell", 10.0, 1000)
+        assert cost.stamp_duty > Decimal("0")
 
 
 class TestDecimalUtils:

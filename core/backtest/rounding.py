@@ -38,8 +38,8 @@ def _code_to_board(code: str) -> str:
     if code.startswith("300") or code.startswith("301"):
         return "szse_gem"
     if code.startswith(("8", "4", "9")):
-        # 北交所：8开头(原精选层)、920开头(新代码段)
-        if code.startswith("920") or code.startswith("83") or code.startswith("87") or code.startswith("88"):
+        # 北交所：43开头(原基础层/创新层)、8开头(原精选层)、920开头(新代码段)
+        if code.startswith("920") or code.startswith(("43", "83", "87", "88")):
             return "bse"
     if code.startswith("6"):
         return "sse_main"

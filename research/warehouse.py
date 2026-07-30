@@ -73,8 +73,24 @@ def load_meta() -> dict:
 
 
 def _save_meta(meta: dict) -> None:
-    _meta_path().parent.mkdir(parents=True, exist_ok=True)
-    _meta_path().write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+    p = _meta_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(p, lambda tmp: tmp.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=1)))
+
+
+def _atomic_write(target: Path, writer) -> None:
+    """tmp + rename 原子落盘：进程中途挂掉不会留下半截文件。"""
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    try:
+        writer(tmp)
+        tmp.replace(target)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def rebuild_meta() -> dict:
@@ -135,7 +151,12 @@ def read_kline(code: str, start: date | None = None,
     p = _kline_path(code)
     if not p.exists():
         return None
-    df = pd.read_parquet(p)
+    try:
+        df = pd.read_parquet(p)
+    except Exception as e:
+        # 截断/损坏的 parquet 不该让整个回测崩掉：当作无数据，交由上游重拉
+        logger.warning("warehouse %s parquet 损坏（%s），当作无数据", code, e)
+        return None
     if start is not None:
         df = df[df["trade_date"] >= start]
     if end is not None:
@@ -229,7 +250,7 @@ def upsert_kline(code: str, new_df: pd.DataFrame,
         pd.concat([old, new_rows], ignore_index=True))
 
     _kline_dir().mkdir(parents=True, exist_ok=True)
-    merged.to_parquet(p, index=False)
+    _atomic_write(p, lambda tmp: merged.to_parquet(tmp, index=False))
     prev_fetch_start = meta.get(code, {}).get("fetch_start")
     if action == "rebase_detected":
         prev_fetch_start = None  # 旧数据已废弃，头部覆盖需重新建立
@@ -263,9 +284,9 @@ def snapshot_constituents(board: str, codes: list[str],
     dir_ = _cons_dir(board)
     dir_.mkdir(parents=True, exist_ok=True)
     p = dir_ / f"{d.isoformat()}.json"
-    p.write_text(json.dumps(
+    _atomic_write(p, lambda tmp: tmp.write_text(json.dumps(
         {"board": board, "date": d.isoformat(), "codes": list(codes)},
-        ensure_ascii=False))
+        ensure_ascii=False)))
     return p
 
 

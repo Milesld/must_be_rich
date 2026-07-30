@@ -26,7 +26,7 @@ def _code_to_board_id(code: str) -> str:
         return "sse_star"
     if code.startswith(("300", "301")):
         return "szse_gem"
-    if code.startswith("920") or code.startswith("83") or code.startswith("87") or code.startswith("88"):
+    if code.startswith("920") or code.startswith(("43", "83", "87", "88")):
         return "bse"
     if code.startswith("6"):
         return "sse_main"
@@ -116,7 +116,21 @@ class TradingConstraints:
                 if limit_val is not None:
                     price_limit = limit_val
 
-            # 新股无涨跌幅限制（简化：不在这里处理，由外部设置 special=True 跳过）
+            # 新股/次新无涨跌幅限制期（主板首日 ±44%、创业板与科创板前 5 日无限制）：
+            # 数据行给出 no_price_limit=True 时不登记涨跌停，check_price_limit 直接放行。
+            # 宇宙层（filter_universe_pit 的次新过滤）通常已排除这些标的，此开关是
+            # 自定义宇宙/单票回放时的正确性兜底。
+            if row.get("no_price_limit", False):
+                self._sealed_status[code] = (False, False)
+                if is_suspended:
+                    self._suspended_codes.add(code)
+                close = row.get("close", pre_close)
+                if close > 0:
+                    self._last_prices[code] = close
+                elif pre_close > 0:
+                    self._last_prices[code] = pre_close
+                continue
+
             limit_up = pre_close * (1 + price_limit)
             limit_down = pre_close * (1 - price_limit)
             self._price_limits[code] = (limit_up, limit_down)
@@ -287,19 +301,27 @@ class TradingConstraints:
         is_st: bool,
         trade_date: date,
     ) -> float | None:
-        """从 override 规则列表中匹配适用的涨跌幅。"""
+        """从 override 规则列表中匹配适用的涨跌幅。
+
+        配置里的日期写成字符串（`trade_date < '2026-07-06'`），故求值环境把
+        trade_date 也转成 ISO 字符串——直接塞 date 对象会触发
+        `date < str` 的 TypeError，override 静默失效。
+        """
         for ov in overrides:
             condition = ov.get("condition", "")
             try:
                 # 安全的条件求值（仅支持 is_st 和 trade_date 两个变量）
                 env = {
                     "is_st": is_st,
-                    "trade_date": trade_date,
+                    "trade_date": trade_date.isoformat() if hasattr(trade_date, "isoformat")
+                    else str(trade_date),
                     "True": True,
                     "False": False,
                 }
                 if eval(condition, {"__builtins__": {}}, env):
                     return float(ov["price_limit"])
-            except Exception:
-                logger.debug("涨跌幅 override 条件求值失败: %s", condition)
+            except Exception as e:
+                # 求值失败意味着涨跌幅规则没生效，属配置错误，必须可见
+                logger.warning("涨跌幅 override 条件求值失败（该规则未生效）: %s → %s",
+                               condition, e)
         return None

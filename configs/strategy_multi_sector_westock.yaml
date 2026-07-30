@@ -40,7 +40,9 @@ strategy:
   rebalance_frequency: monthly
   # ── 组合约束（路线图 2.4，第 7 阶段新增）──
   max_weight_per_stock: 0.10      # 单票权重上限（等权 1/20=5% 已低于上限；防 top_n 调小后集中）
-  max_per_sector: 6               # 单行业最多 6 只 ≈ 30% 敞口上限
+  max_per_sector: 10              # 单行业最多 10 只 = 50% 敞口上限
+                                  # 只有 2 个板块，6 只/板块 × 2 = 12 < top_n=20，
+                                  # 会让仓位上限只有 60%；板块数增加后可再调小。
   rank_buffer: 40                 # 已持有排名 ≤40 保留（换手控制；null=关闭）
   # ── 因子中性化（路线图 2.2，复用 core/features/neutralizer）──
   neutralize:

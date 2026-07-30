@@ -91,7 +91,13 @@ def cmd_update(config_path: str) -> None:
                 continue
             action = wh.upsert_kline(code, df, meta, fetch_start=None)
             if action == "rebase_detected":
-                # 基线已变：仓内旧数据已废弃，全量重拉恢复完整历史
+                # 基线已变：仓内旧数据已废弃，全量重拉恢复完整历史。
+                # 必须先清掉该股的分段磁盘缓存——否则全量重拉会命中 TTL=3650 天的
+                # 旧基线缓存段，只有含今日的那段是新基线，仓里留下混合复权序列。
+                from research.westock_source import _purge_kline_cache
+                purged = _purge_kline_cache(code)
+                if purged:
+                    logger.info("%s 基线变化，清除 %d 个 kline 缓存段后重拉", code, purged)
                 full_df = _fetch_range(code, full_start, today)
                 if full_df is not None and not full_df.empty:
                     wh.upsert_kline(code, full_df, meta, fetch_start=full_start)

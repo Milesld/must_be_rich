@@ -257,6 +257,50 @@ class TestCheckAll:
         assert result.reject_reason is not None
 
 
+class TestSTOverride:
+    """ST 涨跌幅 override：配置条件里 trade_date 是字符串，求值环境必须同类型。"""
+
+    BOARDS = {
+        "sse_main": {
+            "price_limit": 0.10,
+            "price_limit_overrides": [
+                {"condition": "is_st == True and trade_date < '2026-07-06'",
+                 "price_limit": 0.05},
+                {"condition": "is_st == True and trade_date >= '2026-07-06'",
+                 "price_limit": 0.10},
+            ],
+        }
+    }
+
+    def _st_data(self) -> dict[str, dict]:
+        return {"600100": {"pre_close": 10.0, "close": 10.2, "is_st": True,
+                           "is_suspended": False, "volume": 1000}}
+
+    def test_st_limit_5pct_before_switch(self) -> None:
+        tc = TradingConstraints(self.BOARDS)
+        tc.update_daily_info(self._st_data(), trade_date=date(2026, 7, 1))
+        assert tc.check_price_limit("600100", 10.6)[0] is False  # >10.5 涨停价
+        assert tc.check_price_limit("600100", 10.4)[0] is True
+
+    def test_st_limit_10pct_after_switch(self) -> None:
+        tc = TradingConstraints(self.BOARDS)
+        tc.update_daily_info(self._st_data(), trade_date=date(2026, 7, 6))
+        assert tc.check_price_limit("600100", 10.9)[0] is True
+
+
+class TestBoardMapping:
+    def test_bse_43_segment(self) -> None:
+        from core.backtest.constraints import _code_to_board_id
+        assert _code_to_board_id("430047") == "bse"
+
+    def test_no_price_limit_row_skips_check(self) -> None:
+        tc = TradingConstraints()
+        tc.update_daily_info({"601001": {"pre_close": 10.0, "close": 14.0,
+                                         "no_price_limit": True, "volume": 100}})
+        # 新股首日无涨跌幅限制 → 不登记涨跌停，任意价格放行
+        assert tc.check_price_limit("601001", 14.4)[0] is True
+
+
 class TestResetDay:
     def test_reset_clears_today_bought(self, tc: TradingConstraints) -> None:
         tc.mark_bought("600519")

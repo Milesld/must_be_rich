@@ -26,9 +26,12 @@ paper_trading signal）共用，保证「回测的组合规则 = 实盘的组合
 
 from __future__ import annotations
 
+import logging
 import math
 
 import pandas as pd
+
+logger = logging.getLogger("portfolio_rules")
 
 
 def select_target_portfolio(
@@ -65,6 +68,9 @@ def select_target_portfolio(
     ranked = scores.sort_values(ascending=False)
     order = list(ranked.index)
     rank_of = {c: i + 1 for i, c in enumerate(order)}
+    if rank_buffer and rank_buffer < top_n:
+        logger.warning("rank_buffer=%d < top_n=%d，缓冲区不起作用，已按 top_n 处理"
+                       "（配置疑似写错）", rank_buffer, top_n)
     buffer = max(rank_buffer, top_n) if rank_buffer else None
 
     sector_map = sector_map or {}

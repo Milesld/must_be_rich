@@ -96,6 +96,11 @@ optimizer:
 
 # ══════════════════════════════════════════════════════════
 # 6因子组合：双动量+低波动反转，时间衰减适配
+#
+# ⚠ 研究纪律待办：本组权重是优化器在银行池上的搜索结果，与 2026-07 首跑
+#   factor_ic 结论冲突——IC 报告里银行池只有 volatility/amplitude/atr/
+#   bollinger/rsi 通过，动量类因子 ICIR 为负。当前权重仍以 momentum_60d(0.4)
+#   为主，属"暂时保留优化器结果"，在按 IC 结论重跑并回写之前不要据此出实盘信号。
 # ══════════════════════════════════════════════════════════
 factors:
   momentum_60d:
@@ -104,7 +109,7 @@ factors:
     module: core.features.technical
     function: momentum
     params: {window: 60}
-    description: "60日动量 — 半导体中期趋势核心（时间加权下近期动量更重要）"
+    description: "60日动量 — 银行池中期趋势（注意：IC 显示银行池动量 ICIR 为负）"
 
   volatility_20d:
     enabled: true

@@ -153,14 +153,23 @@ class OHLCFillSimulator:
         high = float(row.get("high", 0))
         low = float(row.get("low", 0))
         close = float(row.get("close", 0))
-        vwap = float(row.get("amount", 0)) / float(row.get("volume", 1)) if row.get("volume", 0) > 0 else close
 
         if close <= 0:
             return 0.0, 0
 
-        # 用 VWAP 作为成交价近似，受 high/low 约束
-        fill_price = vwap if vwap > 0 else close
-        fill_price = max(low, min(fill_price, high))
+        # VWAP = amount / volume。volume 单位随数据源而异（股 vs 手），单位不一致时
+        # vwap 会偏离 100 倍；此时不能 clip 到 high/low 边界（会系统性按最高/最低价
+        # 成交），而应判定为不可用并退回 close。
+        volume = float(row.get("volume", 0))
+        amount = float(row.get("amount", 0))
+        vwap = amount / volume if volume > 0 else 0.0
+        if vwap <= 0 or (high > 0 and low > 0 and not (low <= vwap <= high)):
+            if vwap > 0 and high > 0:
+                logger.debug("%s vwap %.4f 落在 [%.2f, %.2f] 之外（volume 单位可疑），"
+                             "退回 close", intent.code, vwap, low, high)
+            fill_price = close
+        else:
+            fill_price = vwap
         return fill_price, intent.shares
 
 
@@ -211,8 +220,8 @@ class BacktestEngine:
         initial_capital: float,
         config: Any = None,
         fill_simulator: FillSimulator | None = None,
-        commission_rate: float = 0.00015,
-        stamp_duty_rate: float = 0.0005,
+        commission_rate: float | None = None,
+        stamp_duty_rate: float | None = None,
         board_config: dict | None = None,
     ) -> None:
         """初始化回测引擎。
@@ -223,8 +232,9 @@ class BacktestEngine:
             initial_capital: 初始资金。
             config: ConfigLoader 实例（用于加载板块/风控规则）。
             fill_simulator: 自定义撮合模拟器（默认 ClosePriceFillSimulator）。
-            commission_rate: 佣金率（覆盖系统默认值）。
-            stamp_duty_rate: 印花税率（覆盖系统默认值）。
+            commission_rate: 佣金率（覆盖系统默认万1.5）。None = 用默认。
+            stamp_duty_rate: 印花税率（覆盖）。None = 按交易日自动分段
+                             （2023-08-28 前 0.1%，之后 0.05%）。
             board_config: 板块规则 dict（{board_id: {price_limit, min_shares, ...}}）。
                           优先级：显式传入 > config.boards > configs/boards/*.yaml 自动加载。
         """
@@ -242,7 +252,11 @@ class BacktestEngine:
             board_cfg = getattr(config, "boards", None)
         if board_cfg is None:
             board_cfg = _load_boards_config()
-        self.cost_model = TransactionCostModel()
+        # 费率覆盖真正传给成本模型（历史 bug：只存字段，cost_model 一直用内置常量）
+        self.cost_model = TransactionCostModel(
+            commission_rate=commission_rate,
+            stamp_duty_rate=stamp_duty_rate,
+        )
         self.constraints = TradingConstraints(board_cfg)
         self.rounder = ShareRounder(board_cfg)
         self.fill_simulator = fill_simulator or ClosePriceFillSimulator()
@@ -250,7 +264,6 @@ class BacktestEngine:
         # 费率覆盖
         self._commission_rate = commission_rate
         self._stamp_duty_rate = stamp_duty_rate
-
         # 运行时状态
         self.cash: float = initial_capital
         self.positions: dict[str, int] = {}
@@ -457,7 +470,8 @@ class BacktestEngine:
             )
 
         # 4. 成本计算
-        cost = self.cost_model.calculate(intent.code, intent.side, fill_price, fill_shares)
+        cost = self.cost_model.calculate(
+            intent.code, intent.side, fill_price, fill_shares, trade_date=trade_date)
 
         status = "filled" if fill_shares == rounded_shares else "partial"
 
@@ -511,6 +525,28 @@ class BacktestEngine:
             self.positions[record.code] = new_shares
             self.position_costs[record.code] = new_avg_cost
         else:
+            # 卖出前按实际持仓截断：超卖会让 cash 凭空增加、持仓变负（A股无卖空）
+            held = self.positions.get(record.code, 0)
+            if record.filled_shares > held:
+                logger.warning(
+                    "[%s] 卖出超持仓：%s 拟卖 %d 股，实际持仓 %d 股，已按持仓截断。",
+                    record.trade_date, record.code, record.filled_shares, held,
+                )
+                record.filled_shares = held
+                if held <= 0:
+                    record.status = "rejected"
+                    record.reject_reason = "无持仓可卖"
+                    record.filled_price = 0.0
+                    record.filled_shares = 0
+                    self.trades.append(record)
+                    return
+                # 股数变了，成本与成交金额需重算
+                record.cost_breakdown = self.cost_model.calculate(
+                    record.code, record.side, record.filled_price, record.filled_shares,
+                    trade_date=record.trade_date)
+                cb = record.cost_breakdown
+                total_cost = float(cb.total) if cb else 0.0
+                amount = record.filled_price * record.filled_shares
             # 卖出：增加现金（成交金额 - 佣金 - 印花税 - 过户费）
             self.cash += (amount - total_cost)
             old_shares = self.positions.get(record.code, 0)

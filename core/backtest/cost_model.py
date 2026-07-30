@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from typing import Literal
@@ -20,7 +21,9 @@ import pandas as pd
 
 # ── 费率常量（Decimal 精度） ──────────────────────
 
-STAMP_DUTY_RATE = Decimal("0.0005")        # 印花税 0.05%（仅卖方）
+STAMP_DUTY_RATE = Decimal("0.0005")        # 印花税 0.05%（仅卖方，2023-08-28 起）
+STAMP_DUTY_RATE_LEGACY = Decimal("0.001")  # 2023-08-28 前为 0.1%
+STAMP_DUTY_CUT_DATE = date(2023, 8, 28)    # 印花税减半生效日
 COMMISSION_RATE = Decimal("0.00015")        # 佣金 万1.5
 MIN_COMMISSION = Decimal("5.00")            # 最低5元/笔
 TRANSFER_FEE_RATE = Decimal("0.00001")      # 过户费 十万分之一（按成交额）
@@ -32,8 +35,9 @@ SLIPPAGE_MAIN = Decimal("0.002")            # 主板其他 0.2%
 SLIPPAGE_GEM_STAR = Decimal("0.003")        # 创业板/科创板 0.3%
 SLIPPAGE_SMALL_CAP = Decimal("0.005")       # 小盘股（<50亿市值） 0.5%
 
-# 板块识别
-_ETF_PREFIX = "51"
+# 基金/ETF 代码段（免征印花税）：
+#   沪市 51x/56x/58x（含科创板 ETF 588xxx）、深市 15x/16x/18x
+_FUND_PREFIXES = ("51", "56", "58", "15", "16", "18")
 
 
 @dataclass(frozen=True)
@@ -66,14 +70,26 @@ class TransactionCostModel:
         # cost.commission = 25.20, cost.total = 26.88
     """
 
-    def __init__(self, csi800_codes: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        csi800_codes: set[str] | None = None,
+        commission_rate: Decimal | float | None = None,
+        stamp_duty_rate: Decimal | float | None = None,
+    ) -> None:
         """初始化。
 
         Args:
             csi800_codes: 中证800成分股代码集合，用于滑点分层。
                           为 None 时所有股票按主板滑点率处理。
+            commission_rate: 佣金率覆盖（None 用默认万1.5）。
+            stamp_duty_rate: 印花税率覆盖（None 时按交易日自动分段：
+                             2023-08-28 前 0.1%，之后 0.05%）。
         """
         self._csi800 = csi800_codes or set()
+        self._commission_rate = (
+            _to_d(commission_rate) if commission_rate is not None else COMMISSION_RATE)
+        self._stamp_duty_rate = (
+            _to_d(stamp_duty_rate) if stamp_duty_rate is not None else None)
 
     # ── 主计算方法 ──────────────────────────────
 
@@ -85,6 +101,7 @@ class TransactionCostModel:
         shares: int,
         is_etf: bool | None = None,
         market_cap: Decimal | float | None = None,
+        trade_date: date | None = None,
     ) -> CostBreakdown:
         """计算单笔交易的全部成本。
 
@@ -95,6 +112,7 @@ class TransactionCostModel:
             shares: 成交股数。
             is_etf: 是否ETF（None 时根据 code 前缀自动判断）。
             market_cap: 市值（可选，用于小盘股滑点识别）。
+            trade_date: 交易日（用于印花税历史分段；None 按现行 0.05%）。
 
         Returns:
             CostBreakdown 包含各费用项的拆分。
@@ -104,7 +122,7 @@ class TransactionCostModel:
 
         is_etf_val = self._is_etf(code) if is_etf is None else is_etf
         commission = self._calc_commission(amount)
-        stamp_duty = self._calc_stamp_duty(amount, side, is_etf_val)
+        stamp_duty = self._calc_stamp_duty(amount, side, is_etf_val, trade_date)
         transfer_fee = self._calc_transfer_fee(amount)
         slippage = self._calc_slippage(code, amount, market_cap)
 
@@ -127,16 +145,28 @@ class TransactionCostModel:
             3000元 × 万1.5 = 4.5 → 实收5元
             50000元 × 万1.5 = 7.5 → 实收7.5元
         """
-        raw = amount * COMMISSION_RATE
+        raw = amount * self._commission_rate
         return max(raw, MIN_COMMISSION)
 
     def _calc_stamp_duty(
         self, amount: Decimal, side: str, is_etf: bool,
+        trade_date: date | None = None,
     ) -> Decimal:
-        """印花税：仅卖方 0.05%，ETF免征。"""
+        """印花税：仅卖方，基金/ETF 免征。
+
+        税率按交易日分段：2023-08-28 证券交易印花税减半（0.1% → 0.05%），
+        跨该日的回测若统一用 0.05% 会低估早期卖出成本。
+        显式传入 stamp_duty_rate 时以覆盖值为准。
+        """
         if side != "sell" or is_etf:
             return Decimal("0")
-        return (amount * STAMP_DUTY_RATE).quantize(
+        if self._stamp_duty_rate is not None:
+            rate = self._stamp_duty_rate
+        elif trade_date is not None and trade_date < STAMP_DUTY_CUT_DATE:
+            rate = STAMP_DUTY_RATE_LEGACY
+        else:
+            rate = STAMP_DUTY_RATE
+        return (amount * rate).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP,
         )
 
@@ -179,8 +209,12 @@ class TransactionCostModel:
     # ── 板块判断 ──────────────────────────────
 
     def _is_etf(self, code: str) -> bool:
-        """根据代码前缀判断是否为ETF。51xxxx开头的为ETF。"""
-        return code.startswith(_ETF_PREFIX)
+        """是否为基金/ETF（免征印花税）。
+
+        沪市 51x/56x/58x（含科创板 ETF 588xxx）、深市 15x/16x/18x。
+        只判前两位会漏掉深市与科创 ETF，导致误收 0.05% 印花税。
+        """
+        return code.startswith(_FUND_PREFIXES)
 
     def _is_gem_or_star(self, code: str) -> bool:
         """判断是否为创业板/科创板。"""
